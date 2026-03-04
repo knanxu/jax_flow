@@ -1,0 +1,36 @@
+# MeanFlow configuration
+
+name: meanflow
+policy_type: meanflow
+
+# Interpolant configuration
+interp_type: linear  # linear or trigonometric
+
+# Sampler configuration
+sampler:
+  type: euler
+  num_steps: 1       # MeanFlow can do one-step sampling
+  deterministic: true
+  adaptive_step: false
+
+# MeanFlow specific parameters
+time_sampling:
+  mu: -0.4           # Mean of normal distribution before sigmoid
+  sigma: 1.0         # Std of normal distribution before sigmoid
+  ratio_equal: 0.25  # Ratio of samples where s=t (25% s=t, 75% s≠t)
+
+# Adaptive weighting for loss
+adaptive_weight:
+  enabled: true
+  c: 0.01            # Constant in weight formula: w = 1/(loss + c)^p
+  p: 1.0             # Power in weight formula
+
+# Loss computation
+loss:
+  use_stopgrad: true  # Use stop_gradient in Jacobian computation
+  norm_type: l2       # l2 or l1
+  scale: 1.0          # Loss scale factor
+
+# Training specific
+use_ema: true         # Use EMA for target network
+ema_decay: 0.995      # EMA decay rate

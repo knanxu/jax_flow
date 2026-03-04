@@ -1,0 +1,41 @@
+# Main configuration file for JAX Flow
+
+defaults:
+  - task: lift_lowdim
+  - network: mlp
+  - flow: meanflow
+  - optimization: default
+  - _self_
+
+# Random seed
+seed: 42
+
+# Device configuration
+device: cuda  # cuda or cpu
+
+# Logging
+project_name: jax_flow
+experiment_name: ${task.name}_${flow.name}_${network.name}
+log_dir: logs
+checkpoint_dir: checkpoints
+
+# Weights & Biases
+wandb:
+  enabled: true
+  entity: null  # Your W&B entity
+  project: ${project_name}
+  name: ${experiment_name}_seed${seed}
+  tags: [${task.name}, ${flow.name}, ${network.name}]
+
+# Evaluation
+eval:
+  num_episodes: 50
+  render: false
+  save_video: false
+  video_fps: 30
+
+# Checkpointing
+checkpoint:
+  save_freq: 10000
+  keep_last_n: 3
+  save_best: true

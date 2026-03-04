@@ -1,0 +1,46 @@
+# Lift task with low-dimensional state observations
+
+name: lift_lowdim
+env_name: Lift
+obs_type: lowdim
+
+# Dataset configuration
+dataset:
+  path: data/robomimic/lift/ph/low_dim_v141.hdf5
+  horizon: 16          # Action prediction horizon
+  obs_steps: 2         # Observation history length
+  act_steps: 8         # Action execution steps
+  pad_before: 1        # Padding before sequence
+  pad_after: 7         # Padding after sequence
+  
+  # Normalization
+  normalize_obs: true
+  normalize_act: true
+  norm_type: min_max   # min_max or z_score
+  
+  # Data loading
+  num_workers: 4
+  prefetch_factor: 2
+
+# Environment configuration
+env:
+  num_envs: 10         # Number of parallel environments
+  max_episode_steps: 400
+  reward_shaping: false
+  
+  # Robomimic specific
+  robots: Panda
+  controller: OSC_POSE
+  gripper_type: default
+  has_renderer: false
+  has_offscreen_renderer: false
+  use_camera_obs: false
+  control_freq: 20
+
+# Observation and action dimensions
+obs_dim: 39            # State observation dimension
+act_dim: 7             # Action dimension (6 DoF + gripper)
+
+# Task-specific parameters
+task_horizon: 400      # Maximum episode length
+success_threshold: 0.9 # Success rate threshold

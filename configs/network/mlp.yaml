@@ -1,0 +1,28 @@
+# MLP network configuration
+
+name: mlp
+network_type: mlp
+
+# Architecture parameters
+hidden_dims: [512, 512, 512]
+emb_dim: 256
+num_layers: 6
+dropout_rate: 0.0
+
+# Time embedding
+timestep_emb_dim: 128
+timestep_emb_type: uniform_frequency  # uniform_frequency or positional
+max_freq: 10.0
+
+# Activation function
+activation: relu  # relu, gelu, silu, swish
+
+# Normalization
+use_layer_norm: false
+use_batch_norm: false
+
+# Residual connections
+use_residual: true
+
+# Output
+use_scalar_output: true  # Whether to output auxiliary scalar
