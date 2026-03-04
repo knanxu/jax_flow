@@ -114,7 +114,7 @@ class TrainState(flax.struct.PyTreeNode):
             **kwargs,
         )
 
-    def __call__(self, *args, params=None, method=None, **kwargs):
+    def __call__(self, *args, params=None, method=None, rngs=None, **kwargs):
         """Forward pass through the model.
 
         When params is not provided, uses stored parameters without flowing
@@ -124,6 +124,7 @@ class TrainState(flax.struct.PyTreeNode):
             *args: Positional arguments for the model.
             params: Parameters to use. If None, uses stored params (no grad flow).
             method: Method name to call in the model. If None, uses default apply.
+            rngs: Optional dict of PRNG keys (e.g. {'dropout': key}) for stochastic layers.
             **kwargs: Keyword arguments for the model.
 
         Returns:
@@ -135,7 +136,11 @@ class TrainState(flax.struct.PyTreeNode):
 
         method_fn = getattr(self.model_def, method) if method is not None else None
 
-        return self.apply_fn(variables, *args, method=method_fn, **kwargs)
+        extra_kwargs = {}
+        if rngs is not None:
+            extra_kwargs["rngs"] = rngs
+
+        return self.apply_fn(variables, *args, method=method_fn, **extra_kwargs, **kwargs)
 
     def select(self, name):
         """Helper to select a module from ModuleDict.

@@ -1,0 +1,19 @@
+# Transformer network configuration
+
+name: transformer
+network_type: transformer
+
+# Architecture parameters
+n_layer: 4
+n_head: 4
+n_emb: 256
+emb_dim: 256
+
+# Time embedding
+timestep_embed_dim: 128
+
+# Regularization
+dropout: 0.1
+
+# FFN multiplier (hardcoded to 4 in TransformerEncoderBlock/DecoderBlock)
+# No need to specify here

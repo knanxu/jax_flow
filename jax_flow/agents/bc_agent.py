@@ -32,10 +32,10 @@ class BCAgent(flax.struct.PyTreeNode):
         Args:
             seed: Random seed.
             ex_observations: Example observations for initialization.
-                Shape: (batch, obs_steps, obs_dim)
+                Shape: (batch, obs_steps, obs_dim) or (batch, obs_dim)
             ex_actions: Example actions for initialization.
-                Shape: (batch, action_dim)
-            config: Configuration dict (ml_collections.ConfigDict).
+                Shape: (batch, horizon, action_dim)
+            config: Configuration dict.
 
         Returns:
             New BCAgent instance.
@@ -43,15 +43,14 @@ class BCAgent(flax.struct.PyTreeNode):
         from jax_flow.core.utils import create_optimizer
         from jax_flow.networks.encoders import create_encoder
         from jax_flow.networks.mlp import MLP
+        from jax_flow.networks.unet import ConditionalUnet1D
+        from jax_flow.networks.transformer import TransformerForFlow
 
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng)
 
         action_dim = ex_actions.shape[-1]
         horizon = config.get("horizon", 10)
-        full_action_dim = (
-            action_dim * horizon if config.get("action_chunking", False) else action_dim
-        )
 
         # Create encoder
         encoder_def = create_encoder(
@@ -60,19 +59,78 @@ class BCAgent(flax.struct.PyTreeNode):
             output_dim=config.get("emb_dim", 256),
         )
 
-        # Create flow network
-        flow_def = MLP(
-            action_dim=full_action_dim,
-            hidden_dims=tuple(config.get("hidden_dims", (512, 512, 512))),
-            cond_dim=config.get("emb_dim", 256),
-            activation=config.get("activation", "gelu"),
-            layer_norm=config.get("layer_norm", False),
-        )
+        # Create flow network based on network_type
+        network_type = config.get("network_type", "mlp")
+        if network_type == "mlp":
+            flow_def = MLP(
+                action_dim=action_dim,
+                hidden_dims=tuple(config.get("hidden_dims", (512, 512, 512))),
+                cond_dim=config.get("emb_dim", 256),
+                activation=config.get("activation", "gelu"),
+                layer_norm=config.get("layer_norm", False),
+            )
+        elif network_type == "unet":
+            flow_def = ConditionalUnet1D(
+                action_dim=action_dim,
+                down_dims=tuple(config.get("down_dims", (256, 512, 1024))),
+                kernel_size=config.get("kernel_size", 5),
+                n_groups=config.get("n_groups", 8),
+                cond_dim=config.get("emb_dim", 256),
+                timestep_embed_dim=config.get("timestep_embed_dim", 128),
+                cond_predict_scale=config.get("cond_predict_scale", True),
+            )
+        elif network_type == "transformer":
+            flow_def = TransformerForFlow(
+                action_dim=action_dim,
+                n_layer=config.get("n_layer", 4),
+                n_head=config.get("n_head", 4),
+                n_emb=config.get("n_emb", 256),
+                cond_dim=config.get("emb_dim", 256),
+                dropout=config.get("dropout", 0.1),
+                timestep_embed_dim=config.get("timestep_embed_dim", 128),
+            )
+        else:
+            raise ValueError(f"Unknown network type: {network_type}")
 
-        # Build ModuleDict
-        ex_times = jnp.zeros((ex_observations.shape[0], 1))
-        ex_cond = jnp.zeros((ex_observations.shape[0], config.get("emb_dim", 256)))
-        ex_flat_actions = jnp.zeros((ex_observations.shape[0], full_action_dim))
+        # Initialize encoder first to get actual cond_dim
+        rng, enc_rng = jax.random.split(rng)
+        encoder_params = encoder_def.init(enc_rng, ex_observations)
+        ex_cond = encoder_def.apply(encoder_params, ex_observations)
+        actual_cond_dim = ex_cond.shape[-1]
+
+        # Rebuild flow network with actual cond_dim
+        if network_type == "mlp":
+            flow_def = MLP(
+                action_dim=action_dim,
+                hidden_dims=tuple(config.get("hidden_dims", (512, 512, 512))),
+                cond_dim=actual_cond_dim,
+                activation=config.get("activation", "gelu"),
+                layer_norm=config.get("layer_norm", False),
+            )
+        elif network_type == "unet":
+            flow_def = ConditionalUnet1D(
+                action_dim=action_dim,
+                down_dims=tuple(config.get("down_dims", (256, 512, 1024))),
+                kernel_size=config.get("kernel_size", 5),
+                n_groups=config.get("n_groups", 8),
+                cond_dim=actual_cond_dim,
+                timestep_embed_dim=config.get("timestep_embed_dim", 128),
+                cond_predict_scale=config.get("cond_predict_scale", True),
+            )
+        elif network_type == "transformer":
+            flow_def = TransformerForFlow(
+                action_dim=action_dim,
+                n_layer=config.get("n_layer", 4),
+                n_head=config.get("n_head", 4),
+                n_emb=config.get("n_emb", 256),
+                cond_dim=actual_cond_dim,
+                dropout=config.get("dropout", 0.1),
+                timestep_embed_dim=config.get("timestep_embed_dim", 128),
+            )
+
+        # Build ModuleDict with example inputs
+        ex_times = jnp.zeros((ex_observations.shape[0],))
+        ex_actions_seq = jnp.zeros((ex_observations.shape[0], horizon, action_dim))
 
         networks = {
             "encoder": encoder_def,
@@ -80,7 +138,7 @@ class BCAgent(flax.struct.PyTreeNode):
         }
         network_args = {
             "encoder": (ex_observations,),
-            "flow": (ex_flat_actions, ex_times, ex_times, ex_cond),
+            "flow": (ex_actions_seq, ex_times, ex_times, ex_cond),
         }
 
         network_def = ModuleDict(networks)
@@ -97,7 +155,7 @@ class BCAgent(flax.struct.PyTreeNode):
 
         network = TrainState.create(network_def, network_params, tx=tx)
 
-        # Create interpolant and loss function (avoid recreating in hot path)
+        # Create interpolant and loss function
         interpolant = Interpolant(config.get("interp_type", "linear"))
         loss_fn_type = get_loss_fn(config.get("flow_type", "flow_matching"))
 
@@ -119,16 +177,22 @@ class BCAgent(flax.struct.PyTreeNode):
         Returns:
             Tuple of (new_agent, info_dict).
         """
-        new_rng, rng = jax.random.split(self.rng)
+        new_rng, rng, dropout_rng = jax.random.split(self.rng, 3)
 
         def loss_fn(params):
             # Get encoder and flow network with gradient flow
-            def encode(obs):
-                return self.network(obs, name="encoder", params=params)
+            dropout_rngs = {"dropout": dropout_rng}
 
-            def flow_net(x, s, t, cond, training=True):
+            def encode(obs, training=True):
                 return self.network(
-                    x, s, t, cond, training=training, name="flow", params=params
+                    obs, training=training, name="encoder", params=params,
+                    rngs=dropout_rngs,
+                )
+
+            def flow_net(at, s, t, cond, training=True):
+                return self.network(
+                    at, s, t, cond, training=training, name="flow", params=params,
+                    rngs=dropout_rngs,
                 )
 
             return self.loss_fn_type(
@@ -161,31 +225,22 @@ class BCAgent(flax.struct.PyTreeNode):
         sampler_type = self.config.get("sampler_type", "euler")
         num_steps = self.config.get("flow_steps", 10)
 
-        def encode(obs):
-            return self.network(obs, name="encoder")
+        def encode(obs, training=False):
+            return self.network(obs, training=training, name="encoder")
 
-        def flow_net(x, s, t, cond, training=False):
-            return self.network(x, s, t, cond, training=training, name="flow")
+        def flow_net(at, s, t, cond, training=False):
+            return self.network(at, s, t, cond, training=training, name="flow")
 
         sampler = get_sampler(sampler_type)
 
-        if sampler_type == "mip":
-            actions = sampler(
-                network=flow_net,
-                encoder=encode,
-                observations=observations,
-                rng=rng,
-                config=self.config,
-            )
-        else:
-            actions = sampler(
-                network=flow_net,
-                encoder=encode,
-                observations=observations,
-                num_steps=num_steps,
-                rng=rng,
-                config=self.config,
-            )
+        actions = sampler(
+            network=flow_net,
+            encoder=encode,
+            observations=observations,
+            num_steps=num_steps,
+            rng=rng,
+            config=self.config,
+        )
 
         return jnp.clip(actions, -1, 1)
 
