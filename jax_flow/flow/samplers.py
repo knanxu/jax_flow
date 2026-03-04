@@ -4,28 +4,6 @@ import jax
 import jax.numpy as jnp
 
 
-def _predict_over_horizon(network, x, s, t, cond, training=False):
-    """Predict velocity over horizon dimension using vmap.
-
-    Args:
-        network: Flow network.
-        x: Current state. Shape: (batch, horizon, action_dim)
-        s: Start time. Shape: (batch,)
-        t: End time. Shape: (batch,)
-        cond: Condition. Shape: (batch, cond_dim)
-        training: Whether in training mode.
-
-    Returns:
-        Predicted velocities. Shape: (batch, horizon, action_dim)
-    """
-    # Vectorize over horizon dimension
-    def predict_single(x_single):
-        return network(x_single, s, t, cond, training=training)
-
-    # vmap over axis 1 (horizon dimension)
-    return jax.vmap(predict_single, in_axes=1, out_axes=1)(x)
-
-
 def euler_sampler(network, encoder, observations, num_steps, rng, config):
     """Euler method ODE sampler.
 
@@ -55,8 +33,8 @@ def euler_sampler(network, encoder, observations, num_steps, rng, config):
     for step in range(num_steps):
         t = jnp.full((batch_size,), step * dt)
 
-        # Predict velocity (vectorized over horizon)
-        velocity = _predict_over_horizon(network, x, t, t, cond, training=False)
+        # Predict velocity (network handles horizon dimension)
+        velocity = network(x, t, t, cond, training=False)
 
         # Euler step
         x = x + velocity * dt
@@ -94,14 +72,14 @@ def heun_sampler(network, encoder, observations, num_steps, rng, config):
         t = jnp.full((batch_size,), step * dt)
         t_next = jnp.full((batch_size,), (step + 1) * dt)
 
-        # First velocity estimate (vectorized)
-        v1 = _predict_over_horizon(network, x, t, t, cond, training=False)
+        # First velocity estimate
+        v1 = network(x, t, t, cond, training=False)
 
         # Predictor step
         x_pred = x + v1 * dt
 
-        # Second velocity estimate (vectorized)
-        v2 = _predict_over_horizon(network, x_pred, t_next, t_next, cond, training=False)
+        # Second velocity estimate
+        v2 = network(x_pred, t_next, t_next, cond, training=False)
 
         # Corrector step (average of two velocities)
         x = x + (v1 + v2) * 0.5 * dt
@@ -109,7 +87,7 @@ def heun_sampler(network, encoder, observations, num_steps, rng, config):
     return x
 
 
-def mip_sampler(network, encoder, observations, rng, config):
+def mip_sampler(network, encoder, observations, num_steps, rng, config):
     """MIP (two-step) sampler.
 
     Args:
@@ -129,15 +107,15 @@ def mip_sampler(network, encoder, observations, rng, config):
     # Encode observations
     cond = encoder(observations, training=False)
 
-    # Step 1: Predict from zeros (vectorized)
+    # Step 1: Predict from zeros
     s0 = jnp.zeros((batch_size,))
     x0 = jnp.zeros((batch_size, horizon, action_dim))
-    pred_step1 = _predict_over_horizon(network, x0, s0, s0, cond, training=False)
+    pred_step1 = network(x0, s0, s0, cond, training=False)
 
-    # Step 2: Predict from step 1 output (vectorized)
+    # Step 2: Predict from step 1 output
     t_two_step = config.get("t_two_step", 0.9)
     st = jnp.full((batch_size,), t_two_step)
-    pred_step2 = _predict_over_horizon(network, pred_step1, st, st, cond, training=False)
+    pred_step2 = network(pred_step1, st, st, cond, training=False)
 
     return pred_step2
 

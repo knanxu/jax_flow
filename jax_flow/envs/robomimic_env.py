@@ -2,16 +2,14 @@
 
 import gymnasium as gym
 import numpy as np
-from gymnasium.spaces import Box
+from gymnasium.spaces import Box, Dict
 
 
 class RobomimicWrapper(gym.Env):
     """Robomimic environment wrapper with normalization.
 
-    Follows qc project's design:
-    - Normalizes observations and actions to [-1, 1]
-    - Uses Gymnasium interface
-    - Supports both lowdim and image observations
+    Supports both lowdim and image observations.
+    Uses Gymnasium interface with normalized actions [-1, 1].
     """
 
     def __init__(
@@ -29,17 +27,6 @@ class RobomimicWrapper(gym.Env):
         render_hw=(256, 256),
         render_camera_name="agentview",
     ):
-        """Initialize wrapper.
-
-        Args:
-            env: Robomimic environment.
-            obs_keys: Observation keys to extract.
-            obs_normalizer: MinMaxNormalizer for observations.
-            action_normalizer: MinMaxNormalizer for actions.
-            max_episode_steps: Maximum episode length.
-            render_hw: Render resolution (height, width).
-            render_camera_name: Camera name for rendering.
-        """
         self.env = env
         self.obs_keys = obs_keys
         self.obs_normalizer = obs_normalizer
@@ -56,40 +43,28 @@ class RobomimicWrapper(gym.Env):
         high = np.full(env.action_dimension, fill_value=1.0)
         self.action_space = Box(low=low, high=high, dtype=np.float32)
 
-        # Setup observation space: [-1, 1]
+        # Setup observation space
         obs_example = self._get_observation()
         low = np.full_like(obs_example, fill_value=-1.0)
         high = np.full_like(obs_example, fill_value=1.0)
         self.observation_space = Box(low=low, high=high, dtype=np.float32)
 
     def _get_observation(self):
-        """Get observation from environment."""
+        """Get concatenated lowdim observation from environment."""
         raw_obs = self.env.get_observation()
         obs = np.concatenate([raw_obs[key] for key in self.obs_keys], axis=0)
 
-        # Normalize if normalizer is provided
         if self.obs_normalizer is not None:
             obs = self.obs_normalizer.normalize(obs)
 
         return obs.astype(np.float32)
 
     def seed(self, seed=None):
-        """Set random seed."""
         if seed is not None:
             np.random.seed(seed)
             self._seed = seed
 
     def reset(self, seed=None, options=None):
-        """Reset environment.
-
-        Args:
-            seed: Random seed.
-            options: Additional options (unused).
-
-        Returns:
-            observation: Initial observation.
-            info: Additional info dict.
-        """
         if seed is not None:
             self.seed(seed)
 
@@ -97,58 +72,136 @@ class RobomimicWrapper(gym.Env):
         self.t = 0
 
         obs = self._get_observation()
-        info = {}
-
-        return obs, info
+        return obs, {}
 
     def step(self, action):
-        """Step environment.
-
-        Args:
-            action: Normalized action in [-1, 1].
-
-        Returns:
-            observation: Next observation.
-            reward: Reward.
-            terminated: Whether episode terminated (success).
-            truncated: Whether episode truncated (timeout).
-            info: Additional info dict.
-        """
         # Unnormalize action
         if self.action_normalizer is not None:
             raw_action = self.action_normalizer.unnormalize(action)
         else:
             raw_action = action
 
-        # Step environment
         raw_obs, reward, done, info = self.env.step(raw_action)
-
-        # Get normalized observation
         obs = self._get_observation()
-
-        # Update timestep
         self.t += 1
 
-        # Determine termination
-        terminated = reward > 0.0  # Success
+        # Check success via env.is_success() (robomimic standard)
+        success = self.env.is_success()
+        is_success = success.get("task", False) if isinstance(success, dict) else bool(success)
+
+        terminated = is_success
         truncated = (
             self.t >= self.max_episode_steps if self.max_episode_steps else False
         )
 
-        # Add success flag to info
-        info["success"] = 1 if terminated else 0
+        info["success"] = float(is_success)
 
         return obs, reward, terminated, truncated, info
 
     def render(self, mode="rgb_array"):
-        """Render environment.
+        h, w = self.render_hw
+        return self.env.render(
+            mode=mode, height=h, width=w, camera_name=self.render_camera_name
+        )
 
-        Args:
-            mode: Render mode (only 'rgb_array' supported).
 
-        Returns:
-            RGB image array.
-        """
+class RobomimicImageWrapper(gym.Env):
+    """Robomimic environment wrapper for image observations.
+
+    Returns dict observations with image and lowdim keys.
+    """
+
+    def __init__(
+        self,
+        env,
+        image_keys=("agentview_image",),
+        lowdim_keys=("robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos"),
+        action_normalizer=None,
+        lowdim_normalizer=None,
+        max_episode_steps=None,
+        render_hw=(256, 256),
+        render_camera_name="agentview",
+    ):
+        self.env = env
+        self.image_keys = image_keys
+        self.lowdim_keys = lowdim_keys
+        self.action_normalizer = action_normalizer
+        self.lowdim_normalizer = lowdim_normalizer
+        self.max_episode_steps = max_episode_steps
+        self.render_hw = render_hw
+        self.render_camera_name = render_camera_name
+
+        self._seed = None
+        self.t = 0
+
+        # Action space
+        low = np.full(env.action_dimension, fill_value=-1.0)
+        high = np.full(env.action_dimension, fill_value=1.0)
+        self.action_space = Box(low=low, high=high, dtype=np.float32)
+
+        # Observation space (simplified)
+        self.observation_space = None  # Dict space, set after first obs
+
+    def _get_observation(self):
+        """Get dict observation from environment."""
+        raw_obs = self.env.get_observation()
+        obs = {}
+
+        # Image observations: uint8 -> float32 [0, 1]
+        for key in self.image_keys:
+            if key in raw_obs:
+                img = raw_obs[key].astype(np.float32) / 255.0
+                obs[key] = img
+
+        # Lowdim observations
+        if self.lowdim_keys:
+            lowdim = np.concatenate(
+                [raw_obs[key] for key in self.lowdim_keys], axis=0
+            ).astype(np.float32)
+            if self.lowdim_normalizer is not None:
+                lowdim = self.lowdim_normalizer.normalize(lowdim)
+            obs["lowdim"] = lowdim
+
+        return obs
+
+    def seed(self, seed=None):
+        if seed is not None:
+            np.random.seed(seed)
+            self._seed = seed
+
+    def reset(self, seed=None, options=None):
+        if seed is not None:
+            self.seed(seed)
+
+        self.env.reset()
+        self.t = 0
+
+        obs = self._get_observation()
+        return obs, {}
+
+    def step(self, action):
+        if self.action_normalizer is not None:
+            raw_action = self.action_normalizer.unnormalize(action)
+        else:
+            raw_action = action
+
+        raw_obs, reward, done, info = self.env.step(raw_action)
+        obs = self._get_observation()
+        self.t += 1
+
+        success = self.env.is_success()
+        is_success = success.get("task", False) if isinstance(success, dict) else bool(success)
+
+        terminated = is_success
+        truncated = (
+            self.t >= self.max_episode_steps if self.max_episode_steps else False
+        )
+
+        info["success"] = float(is_success)
+
+        return obs, reward, terminated, truncated, info
+
+    def render(self, mode="rgb_array"):
         h, w = self.render_hw
         return self.env.render(
             mode=mode, height=h, width=w, camera_name=self.render_camera_name
@@ -159,46 +212,106 @@ class FrameStackWrapper(gym.Wrapper):
     """Frame stacking wrapper.
 
     Stacks the last n observations along a new axis.
+    Works with both array and dict observations.
     """
 
     def __init__(self, env, num_stack=2):
-        """Initialize wrapper.
-
-        Args:
-            env: Environment to wrap.
-            num_stack: Number of frames to stack.
-        """
         super().__init__(env)
         self.num_stack = num_stack
         self.frames = None
 
-        # Update observation space
-        low = np.repeat(self.observation_space.low[np.newaxis, ...], num_stack, axis=0)
-        high = np.repeat(
-            self.observation_space.high[np.newaxis, ...], num_stack, axis=0
-        )
-        self.observation_space = Box(
-            low=low, high=high, dtype=self.observation_space.dtype
-        )
+        # Update observation space for array obs
+        if isinstance(self.observation_space, Box):
+            low = np.repeat(self.observation_space.low[np.newaxis, ...], num_stack, axis=0)
+            high = np.repeat(self.observation_space.high[np.newaxis, ...], num_stack, axis=0)
+            self.observation_space = Box(
+                low=low, high=high, dtype=self.observation_space.dtype
+            )
+
+    def _stack_obs(self, obs):
+        """Stack observation into frame buffer."""
+        if isinstance(obs, dict):
+            # Dict observations: stack each key separately
+            if self.frames is None:
+                self.frames = {
+                    key: np.repeat(val[np.newaxis, ...], self.num_stack, axis=0)
+                    for key, val in obs.items()
+                }
+            else:
+                for key in obs:
+                    self.frames[key] = np.roll(self.frames[key], shift=-1, axis=0)
+                    self.frames[key][-1] = obs[key]
+
+            return {key: val.copy() for key, val in self.frames.items()}
+        else:
+            # Array observations
+            if self.frames is None:
+                self.frames = np.repeat(obs[np.newaxis, ...], self.num_stack, axis=0)
+            else:
+                self.frames = np.roll(self.frames, shift=-1, axis=0)
+                self.frames[-1] = obs
+
+            return self.frames.copy()
 
     def reset(self, **kwargs):
-        """Reset environment and initialize frame stack."""
         obs, info = self.env.reset(**kwargs)
-
-        # Initialize frame stack with repeated first observation
-        self.frames = np.repeat(obs[np.newaxis, ...], self.num_stack, axis=0)
-
-        return self.frames.copy(), info
+        self.frames = None  # Reset frame buffer
+        stacked = self._stack_obs(obs)
+        return stacked, info
 
     def step(self, action):
-        """Step environment and update frame stack."""
         obs, reward, terminated, truncated, info = self.env.step(action)
+        stacked = self._stack_obs(obs)
+        return stacked, reward, terminated, truncated, info
 
-        # Shift frames and add new observation
-        self.frames = np.roll(self.frames, shift=-1, axis=0)
-        self.frames[-1] = obs
 
-        return self.frames.copy(), reward, terminated, truncated, info
+class ActionChunkingWrapper(gym.Wrapper):
+    """Action chunking wrapper for executing action sequences.
+
+    The policy predicts a sequence of actions (horizon steps),
+    but only the first act_exec_steps are executed before re-planning.
+    """
+
+    def __init__(self, env, act_exec_steps=8):
+        super().__init__(env)
+        self.act_exec_steps = act_exec_steps
+        self._action_buffer = None
+        self._buffer_idx = 0
+
+    def reset(self, **kwargs):
+        self._action_buffer = None
+        self._buffer_idx = 0
+        return self.env.reset(**kwargs)
+
+    def step(self, action):
+        """Step with action chunking.
+
+        Args:
+            action: Either a single action (action_dim,) or
+                    an action sequence (horizon, action_dim).
+
+        Returns:
+            Standard Gymnasium step outputs.
+        """
+        if action.ndim == 2:
+            # Action sequence: store in buffer
+            self._action_buffer = action
+            self._buffer_idx = 0
+
+        if self._action_buffer is not None and self._buffer_idx < len(self._action_buffer):
+            current_action = self._action_buffer[self._buffer_idx]
+            self._buffer_idx += 1
+        else:
+            current_action = action if action.ndim == 1 else action[0]
+
+        return self.env.step(current_action)
+
+    def needs_replan(self):
+        """Check if the policy needs to re-plan."""
+        return (
+            self._action_buffer is None
+            or self._buffer_idx >= self.act_exec_steps
+        )
 
 
 def make_robomimic_env(
@@ -210,10 +323,15 @@ def make_robomimic_env(
         "robot0_gripper_qpos",
         "object",
     ),
+    obs_type="lowdim",
     obs_normalizer=None,
     action_normalizer=None,
+    lowdim_normalizer=None,
     max_episode_steps=400,
     frame_stack=None,
+    act_exec_steps=None,
+    image_keys=None,
+    lowdim_keys=None,
     seed=None,
 ):
     """Factory function to create robomimic environment.
@@ -221,11 +339,16 @@ def make_robomimic_env(
     Args:
         env_name: Environment name (lift, can, square, etc.).
         dataset_path: Path to dataset (for loading env metadata).
-        obs_keys: Observation keys to extract.
-        obs_normalizer: Observation normalizer.
+        obs_keys: Observation keys for lowdim mode.
+        obs_type: 'lowdim' or 'image'.
+        obs_normalizer: Observation normalizer (lowdim mode).
         action_normalizer: Action normalizer.
+        lowdim_normalizer: Lowdim normalizer (image mode).
         max_episode_steps: Maximum episode length.
         frame_stack: Number of frames to stack (None = no stacking).
+        act_exec_steps: Action execution steps for chunking (None = no chunking).
+        image_keys: Image observation keys (image mode).
+        lowdim_keys: Lowdim observation keys (image mode).
         seed: Random seed.
 
     Returns:
@@ -236,30 +359,54 @@ def make_robomimic_env(
     import robomimic.utils.obs_utils as ObsUtils
 
     # Initialize observation modality mapping
-    ObsUtils.initialize_obs_modality_mapping_from_dict({"low_dim": obs_keys})
+    if obs_type == "image":
+        obs_modality_mapping = {
+            "low_dim": list(lowdim_keys or []),
+            "rgb": list(image_keys or ["agentview_image"]),
+        }
+    else:
+        obs_modality_mapping = {"low_dim": list(obs_keys)}
+
+    ObsUtils.initialize_obs_modality_mapping_from_dict(obs_modality_mapping)
 
     # Load environment metadata from dataset
     env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path)
 
     # Create environment
+    use_image = obs_type == "image"
     env = EnvUtils.create_env_from_metadata(
         env_meta=env_meta,
         render=False,
-        render_offscreen=False,
+        render_offscreen=use_image,
+        use_image_obs=use_image,
     )
 
     # Wrap environment
-    env = RobomimicWrapper(
-        env=env,
-        obs_keys=obs_keys,
-        obs_normalizer=obs_normalizer,
-        action_normalizer=action_normalizer,
-        max_episode_steps=max_episode_steps,
-    )
+    if obs_type == "image":
+        env = RobomimicImageWrapper(
+            env=env,
+            image_keys=image_keys or ("agentview_image",),
+            lowdim_keys=lowdim_keys or (),
+            action_normalizer=action_normalizer,
+            lowdim_normalizer=lowdim_normalizer,
+            max_episode_steps=max_episode_steps,
+        )
+    else:
+        env = RobomimicWrapper(
+            env=env,
+            obs_keys=obs_keys,
+            obs_normalizer=obs_normalizer,
+            action_normalizer=action_normalizer,
+            max_episode_steps=max_episode_steps,
+        )
 
-    # Add frame stacking if requested
+    # Add frame stacking
     if frame_stack is not None and frame_stack > 1:
         env = FrameStackWrapper(env, num_stack=frame_stack)
+
+    # Add action chunking
+    if act_exec_steps is not None:
+        env = ActionChunkingWrapper(env, act_exec_steps=act_exec_steps)
 
     # Set seed
     if seed is not None:

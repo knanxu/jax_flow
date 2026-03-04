@@ -13,9 +13,9 @@ Build a high-quality, reusable JAX codebase for robotics research with:
 2. **Rich flow policies**: Flow matching, MeanFlow, MIP from much-ado-about-noising
 3. **Multiple networks**: MLP (priority), UNet, Transformer (DiT)
 4. **Full environment support**: Robomimic and MimicGen (lowdim + image)
-5. **Clean config management**: ml_collections + absl.flags (JAX community standard)
+5. **Clean config management**: Hydra + OmegaConf (YAML configs)
 6. **Offline-to-online RL**: ACFQL algorithm from qc project
-7. **Extensibility**: Standard agent design (jaxrl, rlax, qc patterns)
+7. **Extensibility**: Standard agent design (jaxrl_m, qc patterns)
 
 ## Commands
 
@@ -28,193 +28,138 @@ pip install -e .[robomimic]
 
 ### Training
 ```bash
-# Behavior cloning
-python examples/train_bc.py --env_name=lift --config=configs/bc_config.py
+# Behavior cloning (Hydra config)
+python scripts/train_bc.py task=lift_lowdim
 
-# ACFQL offline-to-online
-python examples/train_acfql.py --env_name=lift --config=configs/acfql_config.py
-
-# Override config
-python examples/train_bc.py --config.lr=1e-4 --config.batch_size=256
+# Override parameters
+python scripts/train_bc.py task=lift_lowdim optimization.lr=1e-3 optimization.batch_size=128
 ```
 
-### Evaluation
+### Data Download
 ```bash
-python examples/eval_policy.py --checkpoint_path=checkpoints/latest.pkl --env_name=lift --num_episodes=50
+python scripts/download_data.py --task lift --obs_type lowdim
+python scripts/download_data.py --task lift --obs_type image
 ```
 
 ### Testing
 ```bash
 pytest
-pytest tests/test_flow_matching.py -v
-pytest --cov=jax_flow --cov-report=html
-```
-
-### Code Quality
-```bash
 ruff format .
 ruff check --fix .
 pyright jax_flow/
-pre-commit run --all-files
 ```
-**Naming Convention:**
-```
-{task}-{obs_type}-{dataset_type}
-
-Examples:
-- "lift-low_dim-ph"    → Lift task, state obs, proficient-human data
-- "square-image-ph"    → Square task, image obs, proficient-human data
-- "stack-image-mg"     → Stack task, image obs, machine-generated data
-```
-
-**Supported Tasks:**
-- Robomimic: lift, can, square, transport, tool_hang
-- Mimicgen: stack, stack_three, threading, coffee, kitchen, pick_place, etc.
 
 ## Architecture
 
+### Key Design Decisions
+
+- **No FlowMap**: 网络直接输出速度场 `velocity`，不输出最终动作。推理时通过 Euler/Heun ODE 求解器积分得到 action。
+- **网络签名**: `(at, s, t, obs) -> velocity`，其中 `at: (batch, horizon, action_dim)`，网络内部 flatten horizon 维度处理。
+- **Action Chunking**: 网络预测 `horizon` 步动作序列，环境只执行前 `act_exec_steps` 步（Diffusion Policy 风格）。
+- **Encoder 与核心网络分离**: Encoder 独立编码观测为 `cond` 向量，核心网络（MLP/UNet/Transformer）接收 `cond` 作为条件。
+
 ### Core Components
 
-1. **TrainState** (`jax_flow/agents/train_state.py`)
-   - Custom `flax.struct.PyTreeNode` with `apply_loss_fn` method (qc pattern)
-   - Manages params, opt_state, step in immutable state
-   - `select(name)` helper for ModuleDict
+1. **TrainState + ModuleDict** (`jax_flow/agents/train_state.py`)
+   - Custom `flax.struct.PyTreeNode` with `apply_loss_fn` (qc pattern)
+   - ModuleDict: 单个 TrainState 管理多个网络（encoder, flow, critic 等）
+   - `select(name)` helper for module access
 
-2. **Agent System** (`jax_flow/agents/`)
-   - `BCAgent`: Flow matching behavior cloning
-   - `ACFQLAgent`: Offline-to-online RL with flow matching
-   - Immutable PyTreeNode agents (qc pattern)
-   - Single TrainState with ModuleDict for multi-network management
+2. **Agents** (`jax_flow/agents/`)
+   - `BCAgent`: Flow matching BC, immutable PyTreeNode
+   - `ACFQLAgent`: Offline-to-online RL (待完善)
+   - Pattern: `create()` → `update(batch)` → `sample_actions(obs)`
 
 3. **Flow Matching** (`jax_flow/flow/`)
-   - `interpolant.py`: Linear and trigonometric interpolation
-   - `flow_map.py`: Flax Module learning velocity field
-   - `losses.py`: flow_loss, mip_loss, mf_loss (MeanFlow)
-   - `samplers.py`: Euler, Heun samplers
+   - `interpolant.py`: Linear / trigonometric interpolation
+   - `losses.py`: flow_loss, mip_loss, mf_loss (mf_loss 待完整实现 JVP)
+   - `samplers.py`: Euler, Heun, MIP samplers
+   - 网络直接处理 horizon 维度，无需 vmap
 
 4. **Networks** (`jax_flow/networks/`)
-   - `mlp.py`: MLP (priority implementation)
-   - `unet.py`: UNet (Diffusion Policy style, later)
-   - `transformer.py`: DiT (later)
-   - `encoders.py`: Identity, MLP, Image encoders
-   - Unified interface: `(x, s, t, cond) -> velocity`
+   - `mlp.py`: MLP，`@nn.compact`，输入 `(at, s, t, obs)` 输出 `velocity`
+   - `value.py`: Q-function ensemble (nn.vmap)
+   - `embeddings.py`: Fourier / Learned timestep embeddings
+   - `encoders.py`: IdentityEncoder, MLPEncoder + factory
+   - `encoders/`: ResNet18Encoder, SpatialSoftmax, MultiImageEncoder
 
 5. **Data** (`jax_flow/data/`)
-   - `robomimic_dataset.py`: HDF5 loading for robomimic/mimicgen
-   - `normalizer.py`: Observation/action normalization
-   - Supports all robomimic tasks (lift, can, square, transport, tool_hang)
-   - Supports all mimicgen tasks (stack, threading, coffee, etc.)
+   - `robomimic_dataset.py`: Lowdim HDF5 dataset, per-episode 存储 + 全局索引
+   - `robomimic_image_dataset.py`: Image HDF5 dataset, 支持多相机 + lowdim 混合
+   - `normalizer.py`: MinMax, Image, Identity normalizers
 
-6. **Environments** (`jax_flow/envs/`)
-   - `robomimic_env.py`: Environment wrapper
-   - `wrappers.py`: Lowdim/Image wrappers
-   - Unified Gymnasium interface
+6. **Environments** (`jax_flow/envs/robomimic_env.py`)
+   - `RobomimicWrapper`: Lowdim obs, normalized actions
+   - `RobomimicImageWrapper`: Dict obs (images + lowdim)
+   - `FrameStackWrapper`: 观测历史堆叠（支持 array 和 dict obs）
+   - `ActionChunkingWrapper`: 执行 action 序列的前 N 步
 
 7. **Configuration** (`configs/`)
-   - Uses ml_collections + absl.flags
-   - Hierarchical structure: `task/`, `network/`, `optimization/`
-   - Python config files (not YAML)
+   - Hydra + OmegaConf, YAML 格式
+   - 层级: `task/`, `network/`, `flow/`, `optimization/`
 
 ### Training Pipeline
 
-BC training flow (`examples/train_bc.py`):
-1. Load ml_collections config
-2. Create environment and dataset
-3. Initialize BCAgent with `BCAgent.create()`
-4. Training loop:
-   - Sample batch from dataloader
-   - `agent, info = agent.update(batch)` (immutable update)
-   - Periodic evaluation and logging
-5. Save checkpoints
+```
+Dataset → sample_batch → {observations, actions}
+                              ↓
+Encoder(observations) → cond: (batch, cond_dim)
+                              ↓
+t ~ Uniform(0,1), x0 ~ N(0,I), x_t = interp(t, x0, actions)
+                              ↓
+Network(x_t, t, t, cond) → predicted_velocity
+                              ↓
+Loss = MSE(predicted_velocity, target_velocity)
+```
 
-ACFQL training flow (`examples/train_acfql.py`):
-1. Load BC checkpoint or train from scratch
-2. Create ACFQLAgent with BC flow + critic
-3. Online interaction loop:
-   - Collect trajectories with `agent.sample_actions()`
-   - Store in replay buffer
-   - Update with mixed offline/online data
-   - BC flow loss + distillation loss + Q loss
-
-### Key Design Patterns
-
-- **Immutable State**: All state in PyTreeNode, updates return new objects
-- **Pure Functions**: Core logic (loss, update, sample) are pure functions
-- **ModuleDict**: Single TrainState manages multiple networks
-- **Factory Pattern**: `@classmethod create()` for agent initialization
-- **Functional Pipeline**: Side effects only in training scripts
-
-## Configuration Structure
+## Configuration
 
 ```
 configs/
-├── bc_config.py              # BC main config
-├── acfql_config.py           # ACFQL main config
-├── task/
-│   ├── lift_lowdim.py
-│   ├── lift_image.py
-│   └── ...
-├── network/
-│   ├── mlp.py
-│   └── ...
-└── optimization/
-    └── default.py
+├── config.yaml              # Main config (defaults + logging)
+├── task/lift_lowdim.yaml    # horizon=16, obs_steps=2, act_steps=8
+├── network/mlp.yaml         # hidden_dims=[512,512,512], emb_dim=256
+├── flow/meanflow.yaml       # interp=linear, sampler=euler
+└── optimization/default.yaml # lr=1e-4, batch_size=256, steps=300k
 ```
-
-Key parameters:
-- `task.env_name`: Environment name (lift, can, square, etc.)
-- `task.obs_type`: "lowdim" or "image"
-- `task.horizon`: Action prediction horizon (10)
-- `task.obs_steps`: Observation history (2)
-- `task.act_steps`: Action execution steps (8)
-- `network.network_type`: "mlp", "unet", "transformer"
-- `network.hidden_dims`: Network hidden dimensions
-- `optimization.lr`: Learning rate
-- `optimization.batch_size`: Batch size
-- `optimization.gradient_steps`: Total training steps
-- `flow.flow_type`: "flow_matching", "meanflow", "mip"
-- `flow.flow_steps`: Number of ODE steps
 
 ## Implementation Roadmap
 
 **Phase 1: Foundation** (✅ Completed)
-- [x] TrainState with apply_loss_fn
-- [x] ModuleDict helper
-- [x] Basic config system (ml_collections)
-- [x] Data loading (robomimic HDF5)
-- [x] Environment wrappers
-- [x] Normalizers (MinMax, Image)
-- [x] Frame stacking wrapper
+- [x] TrainState, ModuleDict, config system
+- [x] Data loading (lowdim + image), normalizers
+- [x] Environment wrappers (lowdim + image + action chunking)
+- [x] Frame stacking
 
-**Phase 2: Flow Matching** (Next)
-- [ ] Interpolant (linear, trig)
-- [ ] FlowMap module
-- [ ] Losses (flow_loss, mip_loss, mf_loss)
-- [ ] Samplers (Euler, Heun)
-- [ ] MLP network
-- [ ] Timestep embeddings
+**Phase 2: Flow Matching + Networks** (✅ Completed)
+- [x] Interpolant (linear, trig)
+- [x] Losses (flow_loss, mip_loss, mf_loss placeholder)
+- [x] Samplers (Euler, Heun, MIP)
+- [x] MLP network with horizon support
+- [x] Timestep embeddings (Fourier, Learned)
+- [x] Image encoders (ResNet18 + SpatialSoftmax + MultiImage)
 
-**Phase 3: BC Agent**
-- [ ] BCAgent implementation
-- [ ] Training script
-- [ ] Evaluation script
+**Phase 3: BC Agent + Training** (✅ Completed)
+- [x] BCAgent (create, update, sample_actions)
+- [x] Training script (scripts/train_bc.py)
+- [x] Data download script
 
-**Phase 4: ACFQL**
-- [ ] Critic network
-- [ ] ACFQLAgent implementation
-- [ ] Replay buffer
-- [ ] Online training script
+**Phase 4: 验证与调试** (Next)
+- [ ] 下载数据集，端到端训练验证
+- [ ] Evaluation script (rollout + success rate)
+- [ ] Checkpoint save/load
+- [ ] W&B logging 集成
 
-**Phase 5: Extensions**
-- [ ] UNet and Transformer networks
-- [ ] Image encoders (ResNet-18 + spatial softmax)
-- [ ] Image dataset with augmentation
-- [ ] More RL algorithms
+**Phase 5: ACFQL + Extensions**
+- [ ] 完善 ACFQLAgent
+- [ ] MeanFlow 完整实现 (JVP)
+- [ ] UNet / Transformer networks
+- [ ] 图像数据增强 (random crop, color jitter)
 
 ## References
 
 - **qc (ACFQL)**: Agent design, TrainState, ACFQL algorithm
-- **much-ado-about-noising**: Flow matching methods
-- **jaxrl / jaxrl_m**: JAX RL patterns
-- **rlax**: RL algorithm components
+- **much-ado-about-noising**: Flow matching methods (MIP, MeanFlow)
+- **Diffusion Policy**: Action chunking, UNet, obs_steps/horizon/act_steps 设计
+- **jaxrl_m**: JAX RL patterns, ensemblize
 - **robomimic / mimicgen**: Environments and datasets

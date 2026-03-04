@@ -10,7 +10,15 @@ from jax_flow.networks.embeddings import FourierEmbedding
 class MLP(nn.Module):
     """Multi-layer perceptron for flow matching.
 
-    Takes (x, s, t, condition) and outputs velocity field.
+    Takes (at, s, t, obs) and outputs velocity field.
+    Supports action sequences with horizon dimension.
+
+    Network signature: (at, s, t, obs) -> velocity
+    - at: (batch, horizon, action_dim) - action sequence
+    - s: (batch,) - start time
+    - t: (batch,) - end time
+    - obs: (batch, cond_dim) - observation encoding
+    - velocity: (batch, horizon, action_dim) - predicted velocity field
     """
 
     action_dim: int
@@ -21,54 +29,46 @@ class MLP(nn.Module):
     dropout: float = 0.0
     timestep_embed_dim: int = 128
 
-    def setup(self):
-        """Setup network layers."""
-        # Timestep embeddings
-        self.s_embed = FourierEmbedding(embed_dim=self.timestep_embed_dim)
-        self.t_embed = FourierEmbedding(embed_dim=self.timestep_embed_dim)
-
-        # Activation function
-        self.act_fn = get_activation(self.activation)
-
-        # MLP layers
-        self.layers = [nn.Dense(dim) for dim in self.hidden_dims]
-        if self.layer_norm:
-            self.norms = [nn.LayerNorm() for _ in self.hidden_dims]
-
-        # Output layer
-        self.output_layer = nn.Dense(self.action_dim)
-
-    def __call__(self, x, s, t, cond, training=False):
+    @nn.compact
+    def __call__(self, at, s, t, obs, training=False):
         """Forward pass.
 
         Args:
-            x: Current state (action). Shape: (batch, action_dim)
+            at: Current action state. Shape: (batch, horizon, action_dim)
             s: Start time. Shape: (batch,) or (batch, 1)
             t: End time. Shape: (batch,) or (batch, 1)
-            cond: Condition (observation encoding). Shape: (batch, cond_dim)
+            obs: Observation encoding. Shape: (batch, cond_dim)
             training: Whether in training mode.
 
         Returns:
-            Velocity field. Shape: (batch, action_dim)
+            Velocity field. Shape: (batch, horizon, action_dim)
         """
-        # Embed timesteps
-        s_emb = self.s_embed(s)  # (batch, embed_dim)
-        t_emb = self.t_embed(t)  # (batch, embed_dim)
+        batch_size, horizon, action_dim = at.shape
+        act_fn = get_activation(self.activation)
 
-        # Concatenate inputs
-        h = jnp.concatenate([x, s_emb, t_emb, cond], axis=-1)
+        # Embed timesteps
+        s_emb = FourierEmbedding(embed_dim=self.timestep_embed_dim, name='s_embed')(s)
+        t_emb = FourierEmbedding(embed_dim=self.timestep_embed_dim, name='t_embed')(t)
+
+        # Flatten action sequence and concatenate all inputs
+        at_flat = at.reshape(batch_size, -1)  # (batch, horizon * action_dim)
+        h = jnp.concatenate([at_flat, s_emb, t_emb, obs], axis=-1)
 
         # MLP layers
-        for i, layer in enumerate(self.layers):
-            h = layer(h)
+        for i, dim in enumerate(self.hidden_dims):
+            h = nn.Dense(dim, name=f'dense_{i}')(h)
             if self.layer_norm:
-                h = self.norms[i](h)
-            h = self.act_fn(h)
+                h = nn.LayerNorm(name=f'ln_{i}')(h)
+            h = act_fn(h)
             if self.dropout > 0.0 and training:
                 h = nn.Dropout(rate=self.dropout, deterministic=not training)(h)
 
         # Output layer
-        velocity = self.output_layer(h)
+        output_dim = horizon * action_dim
+        velocity_flat = nn.Dense(output_dim, name='output')(h)
+
+        # Reshape to (batch, horizon, action_dim)
+        velocity = velocity_flat.reshape(batch_size, horizon, action_dim)
 
         return velocity
 
@@ -80,16 +80,18 @@ def create_mlp(
     activation="gelu",
     layer_norm=False,
     dropout=0.0,
+    timestep_embed_dim=128,
 ):
     """Factory function to create MLP network.
 
     Args:
-        action_dim: Action dimension.
+        action_dim: Action dimension (per timestep).
         hidden_dims: Hidden layer dimensions.
-        cond_dim: Condition dimension.
+        cond_dim: Condition dimension (observation encoding).
         activation: Activation function.
         layer_norm: Whether to use layer normalization.
         dropout: Dropout rate.
+        timestep_embed_dim: Timestep embedding dimension.
 
     Returns:
         MLP module.
@@ -101,4 +103,5 @@ def create_mlp(
         activation=activation,
         layer_norm=layer_norm,
         dropout=dropout,
+        timestep_embed_dim=timestep_embed_dim,
     )

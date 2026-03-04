@@ -4,29 +4,6 @@ import jax
 import jax.numpy as jnp
 
 
-def _predict_over_horizon(network, x_t, s, t, cond, horizon, training=True):
-    """Predict velocity over horizon dimension using vmap.
-
-    Args:
-        network: Flow network.
-        x_t: Current state. Shape: (batch, horizon, action_dim)
-        s: Start time. Shape: (batch,)
-        t: End time. Shape: (batch,)
-        cond: Condition. Shape: (batch, cond_dim)
-        horizon: Horizon length.
-        training: Whether in training mode.
-
-    Returns:
-        Predicted velocities. Shape: (batch, horizon, action_dim)
-    """
-    # Vectorize over horizon dimension
-    def predict_single(x_single):
-        return network(x_single, s, t, cond, training=training)
-
-    # vmap over axis 1 (horizon dimension)
-    return jax.vmap(predict_single, in_axes=1, out_axes=1)(x_t)
-
-
 def flow_loss(network, encoder, interpolant, batch, rng, config):
     """Standard flow matching loss.
 
@@ -70,10 +47,8 @@ def flow_loss(network, encoder, interpolant, batch, rng, config):
     # Compute target velocity
     target_velocity = interpolant.velocity(t, x0, x1)  # (batch, horizon, action_dim)
 
-    # Predict velocity for each action step (vectorized)
-    predicted_velocity = _predict_over_horizon(
-        network, x_t, t, t, cond, horizon, training=True
-    )
+    # Predict velocity (network now handles horizon dimension internally)
+    predicted_velocity = network(x_t, t, t, cond, training=True)
 
     # Compute loss
     loss = jnp.mean((predicted_velocity - target_velocity) ** 2)
@@ -115,18 +90,18 @@ def mip_loss(network, encoder, interpolant, batch, rng, config):
     # Encode observations
     cond = encoder(observations, training=True)
 
-    # Step 1: s=0, predict from zeros (vectorized)
+    # Step 1: s=0, predict from zeros
     s0 = jnp.zeros((batch_size,))
     x0 = jnp.zeros((batch_size, horizon, action_dim))
-    pred_step1 = _predict_over_horizon(network, x0, s0, s0, cond, horizon, training=True)
+    pred_step1 = network(x0, s0, s0, cond, training=True)
 
-    # Step 2: s=t_two_step, predict from noisy target (vectorized)
+    # Step 2: s=t_two_step, predict from noisy target
     rng, noise_rng = jax.random.split(rng)
     noise = jax.random.normal(noise_rng, (batch_size, horizon, action_dim))
     x_t = actions + (1 - t_two_step) * noise
 
     st = jnp.full((batch_size,), t_two_step)
-    pred_step2 = _predict_over_horizon(network, x_t, st, st, cond, horizon, training=True)
+    pred_step2 = network(x_t, st, st, cond, training=True)
 
     # Compute losses
     loss1 = jnp.mean((pred_step1 - actions) ** 2) / (t_two_step**2)
@@ -181,10 +156,8 @@ def mf_loss(network, encoder, interpolant, batch, rng, config):
     x_t = interpolant.interpolate(t_flow, x0, x1)
     target_velocity = interpolant.velocity(t_flow, x0, x1)
 
-    # Predict velocities (vectorized)
-    pred_velocity = _predict_over_horizon(
-        network, x_t, t_flow, t_flow, cond, horizon, training=True
-    )
+    # Predict velocities
+    pred_velocity = network(x_t, t_flow, t_flow, cond, training=True)
 
     flow_matching_loss = jnp.mean((pred_velocity - target_velocity) ** 2)
 

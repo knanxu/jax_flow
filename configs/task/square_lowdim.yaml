@@ -1,0 +1,32 @@
+# Square task with low-dimensional state observations
+
+name: square_lowdim
+env_name: NutAssemblySquare
+obs_type: lowdim
+
+# Dataset configuration
+dataset:
+  path: /home/xukainan/.robomimic/square/ph/low_dim_v15.hdf5
+  horizon: 16          # Action prediction horizon
+  obs_steps: 2         # Observation history length
+  act_steps: 8         # Action execution steps
+
+  # Normalization
+  normalize_obs: true
+  normalize_act: true
+  norm_type: min_max
+
+# Environment configuration
+env:
+  max_episode_steps: 400
+
+# Observation and action dimensions
+obs_dim: 30            # robot0_eef_pos(3) + robot0_eef_quat(4) + robot0_gripper_qpos(2) + object(14) + robot0_joint_pos(7)
+act_dim: 7             # Action dimension (6 DoF + gripper)
+
+# Observation keys to use
+obs_keys:
+  - robot0_eef_pos
+  - robot0_eef_quat
+  - robot0_gripper_qpos
+  - object

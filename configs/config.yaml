@@ -25,7 +25,10 @@ wandb:
   entity: null  # Your W&B entity
   project: ${project_name}
   name: ${experiment_name}_seed${seed}
-  tags: [${task.name}, ${flow.name}, ${network.name}]
+  tags:
+    - ${task.name}
+    - ${flow.name}
+    - ${network.name}
 
 # Evaluation
 eval:
