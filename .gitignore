@@ -56,7 +56,7 @@ eval_results/
 videos/
 
 # Data
-data/
+/data/
 datasets/
 *.hdf5
 *.h5
