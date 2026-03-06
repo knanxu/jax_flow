@@ -97,6 +97,7 @@ def create_encoder(
     lowdim_keys=('robot0_eef_pos', 'robot0_gripper_qpos'),
     share_image_encoder=False,
     use_spatial_softmax=True,
+    crop_shape=None,
 ):
     """Factory function to create encoder.
 
@@ -140,6 +141,7 @@ def create_encoder(
             image_encoder_output_dim=output_dim,
             share_image_encoder=share_image_encoder,
             use_spatial_softmax=use_spatial_softmax,
+            crop_shape=crop_shape,
         )
     else:
         raise ValueError(f"Unknown encoder type: {encoder_type}")

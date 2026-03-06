@@ -2,11 +2,13 @@
 
 name: square_lowdim
 env_name: NutAssemblySquare
+dataset_name: square  # Dataset name for download (different from env_name)
 obs_type: lowdim
 
 # Dataset configuration
 dataset:
-  path: /home/xukainan/.robomimic/square/ph/low_dim_v15.hdf5
+  path: data/robomimic/square/ph/low_dim_v15.hdf5
+  dataset_type: ph     # ph (proficient-human), mh (multi-human), mg (machine-generated)
   horizon: 16          # Action prediction horizon
   obs_steps: 2         # Observation history length
   act_steps: 8         # Action execution steps

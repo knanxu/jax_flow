@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 
 from jax_flow.agents.train_state import ModuleDict, TrainState, nonpytree_field
+from jax_flow.core.utils import get_batch_size
 from jax_flow.flow.interpolant import Interpolant
 from jax_flow.flow.losses import get_loss_fn
 from jax_flow.flow.samplers import get_sampler
@@ -57,6 +58,9 @@ class BCAgent(flax.struct.PyTreeNode):
             encoder_type=config.get("encoder_type", "mlp"),
             hidden_dims=tuple(config.get("encoder_hidden_dims", (256, 256))),
             output_dim=config.get("emb_dim", 256),
+            image_keys=tuple(config.get("image_keys", ("agentview_image",))),
+            lowdim_keys=tuple(config.get("lowdim_keys", ("robot0_eef_pos", "robot0_gripper_qpos"))),
+            crop_shape=config.get("crop_shape", None),
         )
 
         # Create flow network based on network_type
@@ -93,8 +97,10 @@ class BCAgent(flax.struct.PyTreeNode):
             raise ValueError(f"Unknown network type: {network_type}")
 
         # Initialize encoder first to get actual cond_dim
-        rng, enc_rng = jax.random.split(rng)
-        encoder_params = encoder_def.init(enc_rng, ex_observations)
+        rng, enc_rng, crop_init_rng = jax.random.split(rng, 3)
+        encoder_params = encoder_def.init(
+            {"params": enc_rng, "crop": crop_init_rng}, ex_observations
+        )
         ex_cond = encoder_def.apply(encoder_params, ex_observations)
         actual_cond_dim = ex_cond.shape[-1]
 
@@ -129,8 +135,9 @@ class BCAgent(flax.struct.PyTreeNode):
             )
 
         # Build ModuleDict with example inputs
-        ex_times = jnp.zeros((ex_observations.shape[0],))
-        ex_actions_seq = jnp.zeros((ex_observations.shape[0], horizon, action_dim))
+        batch_size = get_batch_size(ex_observations)
+        ex_times = jnp.zeros((batch_size,))
+        ex_actions_seq = jnp.zeros((batch_size, horizon, action_dim))
 
         networks = {
             "encoder": encoder_def,
@@ -142,7 +149,10 @@ class BCAgent(flax.struct.PyTreeNode):
         }
 
         network_def = ModuleDict(networks)
-        network_params = network_def.init(init_rng, **network_args)["params"]
+        rng, crop_md_rng = jax.random.split(rng)
+        network_params = network_def.init(
+            {"params": init_rng, "crop": crop_md_rng}, **network_args
+        )["params"]
 
         # Create optimizer
         tx = create_optimizer(
@@ -177,16 +187,18 @@ class BCAgent(flax.struct.PyTreeNode):
         Returns:
             Tuple of (new_agent, info_dict).
         """
-        new_rng, rng, dropout_rng = jax.random.split(self.rng, 3)
+        new_rng, rng, dropout_rng, crop_rng = jax.random.split(self.rng, 4)
 
         def loss_fn(params):
             # Get encoder and flow network with gradient flow
-            dropout_rngs = {"dropout": dropout_rng}
+            dropout_rngs = {"dropout": dropout_rng, "crop": crop_rng}
 
-            def encode(obs, training=True):
+            def encode(obs, training=True, rngs=None):
+                if rngs is None:
+                    rngs = dropout_rngs
                 return self.network(
                     obs, training=training, name="encoder", params=params,
-                    rngs=dropout_rngs,
+                    rngs=rngs,
                 )
 
             def flow_net(at, s, t, cond, training=True):
@@ -225,8 +237,10 @@ class BCAgent(flax.struct.PyTreeNode):
         sampler_type = self.config.get("sampler_type", "euler")
         num_steps = self.config.get("flow_steps", 10)
 
-        def encode(obs, training=False):
-            return self.network(obs, training=training, name="encoder")
+        def encode(obs, training=False, rngs=None):
+            if rngs is None:
+                rngs = {}
+            return self.network(obs, training=training, name="encoder", rngs=rngs)
 
         def flow_net(at, s, t, cond, training=False):
             return self.network(at, s, t, cond, training=training, name="flow")

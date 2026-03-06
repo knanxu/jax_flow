@@ -3,6 +3,8 @@
 import jax
 import jax.numpy as jnp
 
+from jax_flow.core.utils import get_batch_size
+
 
 def euler_sampler(network, encoder, observations, num_steps, rng, config):
     """Euler method ODE sampler.
@@ -10,7 +12,7 @@ def euler_sampler(network, encoder, observations, num_steps, rng, config):
     Args:
         network: Flow network.
         encoder: Observation encoder.
-        observations: Observations. Shape: (batch, obs_steps, obs_dim)
+        observations: Observations. Shape: (batch, obs_steps, obs_dim) or dict.
         num_steps: Number of ODE steps.
         rng: Random key.
         config: Configuration dict.
@@ -18,12 +20,12 @@ def euler_sampler(network, encoder, observations, num_steps, rng, config):
     Returns:
         Sampled actions. Shape: (batch, horizon, action_dim)
     """
-    batch_size = observations.shape[0]
+    batch_size = get_batch_size(observations)
     horizon = config.get("horizon", 10)
     action_dim = config.get("action_dim", 7)
 
-    # Encode observations
-    cond = encoder(observations, training=False)
+    # Encode observations (no crop rng needed for inference - uses center crop)
+    cond = encoder(observations, training=False, rngs={})
 
     # Initialize from noise
     x = jax.random.normal(rng, (batch_size, horizon, action_dim))
@@ -56,12 +58,12 @@ def heun_sampler(network, encoder, observations, num_steps, rng, config):
     Returns:
         Sampled actions.
     """
-    batch_size = observations.shape[0]
+    batch_size = get_batch_size(observations)
     horizon = config.get("horizon", 10)
     action_dim = config.get("action_dim", 7)
 
-    # Encode observations
-    cond = encoder(observations, training=False)
+    # Encode observations (no crop rng needed for inference - uses center crop)
+    cond = encoder(observations, training=False, rngs={})
 
     # Initialize from noise
     x = jax.random.normal(rng, (batch_size, horizon, action_dim))
@@ -100,12 +102,12 @@ def mip_sampler(network, encoder, observations, num_steps, rng, config):
     Returns:
         Sampled actions.
     """
-    batch_size = observations.shape[0]
+    batch_size = get_batch_size(observations)
     horizon = config.get("horizon", 10)
     action_dim = config.get("action_dim", 7)
 
-    # Encode observations
-    cond = encoder(observations, training=False)
+    # Encode observations (no crop rng needed for inference - uses center crop)
+    cond = encoder(observations, training=False, rngs={})
 
     # Step 1: Predict from zeros
     s0 = jnp.zeros((batch_size,))

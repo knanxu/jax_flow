@@ -1,0 +1,23 @@
+# Standard Flow Matching configuration
+
+name: flow_matching
+policy_type: flow_matching
+
+# Interpolant configuration
+interp_type: linear  # linear or trigonometric
+
+# Sampler configuration
+sampler:
+  type: euler
+  num_steps: 10      # Number of ODE integration steps
+  deterministic: true
+  adaptive_step: false
+
+# Loss computation
+loss:
+  norm_type: l2       # l2 or l1
+  scale: 1.0          # Loss scale factor
+
+# Training specific
+use_ema: true         # Use EMA for target network
+ema_decay: 0.995      # EMA decay rate

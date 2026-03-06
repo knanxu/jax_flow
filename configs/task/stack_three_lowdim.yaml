@@ -1,0 +1,34 @@
+# StackThree task with low-dimensional state observations
+
+name: stack_three_lowdim
+env_name: StackThree
+dataset_name: stack_three
+obs_type: lowdim
+
+# Dataset configuration
+dataset:
+  path: data/mimicgen/stack_three/ph/low_dim_v141.hdf5
+  dataset_type: ph
+  horizon: 16
+  obs_steps: 2
+  act_steps: 8
+
+  # Normalization
+  normalize_obs: true
+  normalize_act: true
+  norm_type: min_max
+
+# Environment configuration
+env:
+  max_episode_steps: 400
+
+# Observation and action dimensions
+obs_dim: 39
+act_dim: 7
+
+# Observation keys to use
+obs_keys:
+  - robot0_eef_pos
+  - robot0_eef_quat
+  - robot0_gripper_qpos
+  - object

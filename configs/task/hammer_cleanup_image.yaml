@@ -1,0 +1,45 @@
+# HammerCleanup task with image observations
+
+name: hammer_cleanup_image
+env_name: HammerCleanup
+dataset_name: hammer_cleanup
+obs_type: image
+
+# Dataset configuration
+dataset:
+  path: data/mimicgen/hammer_cleanup/ph/image_v141.hdf5
+  dataset_type: ph
+  horizon: 16
+  obs_steps: 2
+  act_steps: 8
+
+  # Image observation keys
+  image_keys: ['agentview_image', 'robot0_eye_in_hand_image']
+
+  # Low-dimensional observation keys (mixed with images)
+  lowdim_keys: ['robot0_eef_pos', 'robot0_eef_quat', 'robot0_gripper_qpos']
+
+  # Image processing
+  image_size: [84, 84]
+  crop_shape: [76, 76]
+
+  # Normalization
+  normalize_obs: true
+  normalize_act: true
+  norm_type: min_max
+
+# Environment configuration
+env:
+  max_episode_steps: 400
+  use_camera_obs: true
+
+# Action dimension
+act_dim: 7
+
+# Observation keys to use
+obs_keys:
+  - agentview_image
+  - robot0_eye_in_hand_image
+  - robot0_eef_pos
+  - robot0_eef_quat
+  - robot0_gripper_qpos

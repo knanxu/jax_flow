@@ -1,0 +1,37 @@
+# Transport task with low-dimensional state observations
+
+name: transport_lowdim
+env_name: Transport
+dataset_name: transport
+obs_type: lowdim
+
+# Dataset configuration
+dataset:
+  path: data/robomimic/transport/ph/low_dim_v15.hdf5
+  dataset_type: ph
+  horizon: 16
+  obs_steps: 2
+  act_steps: 8
+
+  # Normalization
+  normalize_obs: true
+  normalize_act: true
+  norm_type: min_max
+
+# Environment configuration
+env:
+  max_episode_steps: 400
+
+# Observation and action dimensions
+obs_dim: 82
+act_dim: 14
+
+# Observation keys to use
+obs_keys:
+  - robot0_eef_pos
+  - robot0_eef_quat
+  - robot0_gripper_qpos
+  - robot1_eef_pos
+  - robot1_eef_quat
+  - robot1_gripper_qpos
+  - object

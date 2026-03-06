@@ -264,6 +264,10 @@ class FrameStackWrapper(gym.Wrapper):
         stacked = self._stack_obs(obs)
         return stacked, reward, terminated, truncated, info
 
+    def seed(self, seed=None):
+        """Set random seed."""
+        return self.env.seed(seed)
+
 
 class ActionChunkingWrapper(gym.Wrapper):
     """Action chunking wrapper for executing action sequences.
@@ -288,12 +292,13 @@ class ActionChunkingWrapper(gym.Wrapper):
 
         Args:
             action: Either a single action (action_dim,) or
-                    an action sequence (horizon, action_dim).
+                    an action sequence (horizon, action_dim), or None
+                    to use buffered actions.
 
         Returns:
             Standard Gymnasium step outputs.
         """
-        if action.ndim == 2:
+        if action is not None and action.ndim == 2:
             # Action sequence: store in buffer
             self._action_buffer = action
             self._buffer_idx = 0
@@ -302,7 +307,7 @@ class ActionChunkingWrapper(gym.Wrapper):
             current_action = self._action_buffer[self._buffer_idx]
             self._buffer_idx += 1
         else:
-            current_action = action if action.ndim == 1 else action[0]
+            current_action = action if action is not None and action.ndim == 1 else action[0]
 
         return self.env.step(current_action)
 
@@ -312,6 +317,10 @@ class ActionChunkingWrapper(gym.Wrapper):
             self._action_buffer is None
             or self._buffer_idx >= self.act_exec_steps
         )
+
+    def seed(self, seed=None):
+        """Set random seed."""
+        return self.env.seed(seed)
 
 
 def make_robomimic_env(

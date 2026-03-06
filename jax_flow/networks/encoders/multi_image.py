@@ -10,6 +10,7 @@ from collections.abc import Sequence
 import flax.linen as nn
 import jax.numpy as jnp
 
+from jax_flow.networks.encoders.crop_randomizer import CropRandomizer
 from jax_flow.networks.encoders.resnet import ResNet18Encoder
 
 
@@ -34,6 +35,7 @@ class MultiImageEncoder(nn.Module):
     image_encoder_output_dim: int = 64
     share_image_encoder: bool = False
     use_spatial_softmax: bool = True
+    crop_shape: tuple[int, int] | None = None
 
     @nn.compact
     def __call__(self, obs_dict, training=False):
@@ -52,7 +54,6 @@ class MultiImageEncoder(nn.Module):
 
         # Encode images
         if self.share_image_encoder:
-            # Single shared encoder for all cameras
             image_encoder = ResNet18Encoder(
                 output_dim=self.image_encoder_output_dim,
                 use_spatial_softmax=self.use_spatial_softmax,
@@ -63,27 +64,36 @@ class MultiImageEncoder(nn.Module):
                 if key in obs_dict:
                     imgs = obs_dict[key]  # (batch, obs_steps, H, W, C)
                     batch_size, obs_steps = imgs.shape[:2]
-
-                    # Flatten batch and obs_steps
                     imgs_flat = imgs.reshape(-1, *imgs.shape[2:])  # (batch*obs_steps, H, W, C)
 
-                    # Encode
-                    feat = image_encoder(imgs_flat)  # (batch*obs_steps, output_dim)
+                    # Apply crop augmentation
+                    if self.crop_shape is not None:
+                        crop = CropRandomizer(
+                            crop_h=self.crop_shape[0],
+                            crop_w=self.crop_shape[1],
+                            name=f'crop_{key}',
+                        )
+                        imgs_flat = crop(imgs_flat, training=training)
 
-                    # Reshape and flatten
-                    feat = feat.reshape(batch_size, -1)  # (batch, obs_steps*output_dim)
+                    feat = image_encoder(imgs_flat)
+                    feat = feat.reshape(batch_size, -1)
                     features.append(feat)
         else:
-            # Separate encoder for each camera
             for i, key in enumerate(self.image_keys):
                 if key in obs_dict:
                     imgs = obs_dict[key]  # (batch, obs_steps, H, W, C)
                     batch_size, obs_steps = imgs.shape[:2]
-
-                    # Flatten batch and obs_steps
                     imgs_flat = imgs.reshape(-1, *imgs.shape[2:])
 
-                    # Encode with camera-specific encoder
+                    # Apply crop augmentation
+                    if self.crop_shape is not None:
+                        crop = CropRandomizer(
+                            crop_h=self.crop_shape[0],
+                            crop_w=self.crop_shape[1],
+                            name=f'crop_{key}',
+                        )
+                        imgs_flat = crop(imgs_flat, training=training)
+
                     image_encoder = ResNet18Encoder(
                         output_dim=self.image_encoder_output_dim,
                         use_spatial_softmax=self.use_spatial_softmax,
@@ -91,8 +101,6 @@ class MultiImageEncoder(nn.Module):
                         name=f'image_encoder_{i}',
                     )
                     feat = image_encoder(imgs_flat)
-
-                    # Reshape and flatten
                     feat = feat.reshape(batch_size, -1)
                     features.append(feat)
 
@@ -101,11 +109,9 @@ class MultiImageEncoder(nn.Module):
             if key in obs_dict:
                 lowdim = obs_dict[key]  # (batch, obs_steps, dim)
                 batch_size = lowdim.shape[0]
-                # Flatten obs_steps dimension
                 lowdim_flat = lowdim.reshape(batch_size, -1)
                 features.append(lowdim_flat)
 
-        # Concatenate all features
         if not features:
             raise ValueError("No valid observation keys found in obs_dict")
 

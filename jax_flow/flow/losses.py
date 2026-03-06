@@ -3,6 +3,8 @@
 import jax
 import jax.numpy as jnp
 
+from jax_flow.core.utils import get_batch_size
+
 
 def flow_loss(network, encoder, interpolant, batch, rng, config):
     """Standard flow matching loss.
@@ -20,10 +22,10 @@ def flow_loss(network, encoder, interpolant, batch, rng, config):
     Returns:
         Tuple of (loss, info_dict).
     """
-    observations = batch["observations"]  # (batch, obs_steps, obs_dim)
+    observations = batch["observations"]
     actions = batch["actions"]  # (batch, horizon, action_dim)
 
-    batch_size = observations.shape[0]
+    batch_size = get_batch_size(observations)
     horizon = actions.shape[1]
     action_dim = actions.shape[2]
 
@@ -32,14 +34,14 @@ def flow_loss(network, encoder, interpolant, batch, rng, config):
     t = jax.random.uniform(t_rng, (batch_size,), minval=0.0, maxval=1.0)
 
     # Sample noise
-    rng, noise_rng = jax.random.split(rng)
+    rng, noise_rng, crop_rng = jax.random.split(rng, 3)
     x0 = jax.random.normal(noise_rng, (batch_size, horizon, action_dim))
 
     # Data
     x1 = actions
 
     # Encode observations
-    cond = encoder(observations, training=True)  # (batch, cond_dim)
+    cond = encoder(observations, training=True, rngs={"crop": crop_rng})  # (batch, cond_dim)
 
     # Interpolate
     x_t = interpolant.interpolate(t, x0, x1)  # (batch, horizon, action_dim)
@@ -81,14 +83,15 @@ def mip_loss(network, encoder, interpolant, batch, rng, config):
     observations = batch["observations"]
     actions = batch["actions"]
 
-    batch_size = observations.shape[0]
+    batch_size = get_batch_size(observations)
     horizon = actions.shape[1]
     action_dim = actions.shape[2]
 
     t_two_step = config.get("t_two_step", 0.9)
 
     # Encode observations
-    cond = encoder(observations, training=True)
+    rng, crop_rng = jax.random.split(rng)
+    cond = encoder(observations, training=True, rngs={"crop": crop_rng})
 
     # Step 1: s=0, predict from zeros
     s0 = jnp.zeros((batch_size,))
@@ -138,12 +141,13 @@ def mf_loss(network, encoder, interpolant, batch, rng, config):
     observations = batch["observations"]
     actions = batch["actions"]
 
-    batch_size = observations.shape[0]
+    batch_size = get_batch_size(observations)
     horizon = actions.shape[1]
     action_dim = actions.shape[2]
 
     # Encode observations
-    cond = encoder(observations, training=True)
+    rng, crop_rng = jax.random.split(rng)
+    cond = encoder(observations, training=True, rngs={"crop": crop_rng})
 
     # ========== Standard flow matching loss ==========
     rng, t_rng = jax.random.split(rng)

@@ -19,6 +19,24 @@ experiment_name: ${task.name}_${flow.name}_${network.name}
 log_dir: logs
 checkpoint_dir: checkpoints
 
+# Evaluation
+eval:
+  num_episodes: 50
+  eval_interval: 10000  # Evaluate every N training steps
+  render: false
+  save_video: true
+  num_videos: 3  # Save first N episodes as videos
+  video_fps: 30
+  video_size: [256, 256]
+  max_episode_steps: 500
+
+# Checkpointing
+checkpoint:
+  save_freq: 10000
+  keep_last_n: 3
+  save_best: true
+  save_normalizers: true
+
 # Weights & Biases
 wandb:
   enabled: true
@@ -29,16 +47,5 @@ wandb:
     - ${task.name}
     - ${flow.name}
     - ${network.name}
-
-# Evaluation
-eval:
-  num_episodes: 50
-  render: false
-  save_video: false
-  video_fps: 30
-
-# Checkpointing
-checkpoint:
-  save_freq: 10000
-  keep_last_n: 3
-  save_best: true
+  log_videos: true  # Upload videos to W&B
+  log_video_interval: 1  # Upload videos every N evaluations

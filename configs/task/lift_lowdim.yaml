@@ -2,22 +2,24 @@
 
 name: lift_lowdim
 env_name: Lift
+dataset_name: lift  # Dataset name for download
 obs_type: lowdim
 
 # Dataset configuration
 dataset:
   path: data/robomimic/lift/ph/low_dim_v141.hdf5
+  dataset_type: ph     # ph (proficient-human), mh (multi-human), mg (machine-generated)
   horizon: 16          # Action prediction horizon
   obs_steps: 2         # Observation history length
   act_steps: 8         # Action execution steps
   pad_before: 1        # Padding before sequence
   pad_after: 7         # Padding after sequence
-  
+
   # Normalization
   normalize_obs: true
   normalize_act: true
   norm_type: min_max   # min_max or z_score
-  
+
   # Data loading
   num_workers: 4
   prefetch_factor: 2

@@ -21,10 +21,10 @@ wheels/
 *.egg
 
 # Virtual environments
+.venv/
 venv/
-env/
 ENV/
-.venv
+env/
 
 # IDEs
 .vscode/
@@ -32,7 +32,6 @@ ENV/
 *.swp
 *.swo
 *~
-.DS_Store
 
 # Jupyter
 .ipynb_checkpoints/
@@ -43,36 +42,35 @@ ENV/
 .coverage
 htmlcov/
 .tox/
-.hypothesis/
 
-# Logs and databases
+# Logs
 *.log
-*.sqlite
+logs/
+wandb/
 
-# Model checkpoints and outputs
+# Checkpoints and outputs
 checkpoints/
 outputs/
-wandb/
-logs/
-runs/
+results/
+eval_results/
+videos/
 
 # Data
 data/
 datasets/
 *.hdf5
 *.h5
-*.pkl
-*.pickle
+
+# OS
+.DS_Store
+Thumbs.db
 
 # Hydra
 .hydra/
 multirun/
 
-# JAX
-*.npy
-*.npz
-
 # Temporary files
-tmp/
-temp/
 *.tmp
+*.bak
+*.swp
+IMAGE_PIPELINE_SUMMARY.md

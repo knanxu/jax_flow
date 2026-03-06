@@ -41,12 +41,12 @@ def create_learning_rate_schedule(
         schedule = optax.linear_schedule(
             init_value=base_lr,
             end_value=min_lr,
-            transition_steps=total_steps - warmup_steps,
+            transition_steps=max(1, total_steps - warmup_steps),
         )
     elif schedule_type == "cosine":
         schedule = optax.cosine_decay_schedule(
             init_value=base_lr,
-            decay_steps=total_steps - warmup_steps,
+            decay_steps=max(1, total_steps - warmup_steps),
             alpha=min_lr / base_lr,
         )
     else:
@@ -110,9 +110,17 @@ def create_optimizer(
         return optax.adam(learning_rate=lr_schedule)
 
 
+def get_batch_size(obs):
+    """Get batch size from observations (array or dict of arrays)."""
+    if isinstance(obs, dict):
+        return next(iter(obs.values())).shape[0]
+    return obs.shape[0]
+
+
 __all__ = [
     "get_activation",
     "create_learning_rate_schedule",
     "create_optimizer",
     "at_least_ndim",
+    "get_batch_size",
 ]

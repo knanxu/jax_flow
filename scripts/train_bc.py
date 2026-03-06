@@ -14,7 +14,6 @@ Usage:
     python scripts/train_bc.py task=lift_image network=resnet
 """
 
-import os
 from pathlib import Path
 
 import hydra
@@ -25,7 +24,10 @@ from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
 from jax_flow.agents.bc_agent import BCAgent
-from jax_flow.data import make_robomimic_dataset
+from jax_flow.data import make_robomimic_dataset, DatasetManager
+from jax_flow.core.checkpoint import save_checkpoint, cleanup_old_checkpoints
+from jax_flow.core.evaluation import evaluate_policy, print_evaluation_results
+from jax_flow.envs import make_robomimic_env
 
 
 def create_dataloader(dataset, batch_size, shuffle=True):
@@ -47,14 +49,20 @@ def create_dataloader(dataset, batch_size, shuffle=True):
                 obs_batch.append(sample["observations"])
                 act_batch.append(sample["actions"])
 
-            # Stack into batch
-            observations = np.stack(obs_batch, axis=0)
-            actions = np.stack(act_batch, axis=0)
+            # Stack into batch — handle dict obs (image) vs array obs (lowdim)
+            first_obs = obs_batch[0]
+            if isinstance(first_obs, dict):
+                observations = {
+                    k: jnp.array(np.stack([o[k] for o in obs_batch]))
+                    for k in first_obs
+                }
+            else:
+                observations = jnp.array(np.stack(obs_batch))
+            actions = jnp.array(np.stack(act_batch))
 
-            # Convert to JAX arrays
             batch = {
-                "observations": jnp.array(observations),
-                "actions": jnp.array(actions),
+                "observations": observations,
+                "actions": actions,
             }
 
             yield batch
@@ -85,12 +93,39 @@ def main(cfg: DictConfig):
     print("Loading Dataset")
     print("=" * 80)
 
+    # Ensure dataset exists (auto-download if missing)
     dataset_path = cfg.task.dataset.path
-    if not os.path.exists(dataset_path):
-        print(f"Error: Dataset not found at {dataset_path}")
-        print("\nPlease download the dataset first:")
-        print(f"  python scripts/download_data.py --task {cfg.task.env_name.lower()} --obs_type {cfg.task.obs_type}")
+    task_name = cfg.task.get("dataset_name", cfg.task.env_name.lower())
+    dataset_type = cfg.task.dataset.get("dataset_type", "ph")
+    obs_type = cfg.task.obs_type
+
+    resolved_path = DatasetManager.ensure_dataset(
+        dataset_path=dataset_path,
+        task=task_name,
+        dataset_type=dataset_type,
+        obs_type=obs_type,
+        source="robomimic",
+        auto_download=True,
+    )
+
+    if resolved_path is None:
+        print("\n✗ Failed to load dataset. Exiting.")
         return
+
+    # Use resolved path
+    dataset_path = str(resolved_path)
+
+    is_image = cfg.task.obs_type == "image"
+
+    # Get image/lowdim keys from config
+    dataset_kwargs = {}
+    if is_image:
+        image_keys = list(cfg.task.dataset.get("image_keys", ["agentview_image"]))
+        lowdim_keys = list(cfg.task.dataset.get("lowdim_keys", [
+            "robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos",
+        ]))
+        dataset_kwargs["image_keys"] = tuple(image_keys)
+        dataset_kwargs["lowdim_keys"] = tuple(lowdim_keys)
 
     train_dataset = make_robomimic_dataset(
         dataset_path=dataset_path,
@@ -100,6 +135,7 @@ def main(cfg: DictConfig):
         obs_type=cfg.task.obs_type,
         val_ratio=0.1,
         mode="train",
+        **dataset_kwargs,
     )
 
     val_dataset = make_robomimic_dataset(
@@ -110,11 +146,17 @@ def main(cfg: DictConfig):
         obs_type=cfg.task.obs_type,
         val_ratio=0.1,
         mode="val",
+        **dataset_kwargs,
     )
 
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Val dataset size: {len(val_dataset)}")
-    print(f"Observation dim: {train_dataset.obs_dim}")
+    if is_image:
+        print(f"Image keys: {image_keys}")
+        print(f"Lowdim keys: {lowdim_keys}")
+        print(f"Lowdim obs dim: {train_dataset.obs_dim}")
+    else:
+        print(f"Observation dim: {train_dataset.obs_dim}")
     print(f"Action dim: {train_dataset.action_dim}")
 
     # Create dataloaders
@@ -134,7 +176,12 @@ def main(cfg: DictConfig):
     ex_observations = example_batch["observations"]
     ex_actions = example_batch["actions"]
 
-    print(f"Example observations shape: {ex_observations.shape}")
+    if isinstance(ex_observations, dict):
+        print("Example observations (dict):")
+        for k, v in ex_observations.items():
+            print(f"  {k}: {v.shape}")
+    else:
+        print(f"Example observations shape: {ex_observations.shape}")
     print(f"Example actions shape: {ex_actions.shape}")
 
     # Build agent config
@@ -149,16 +196,35 @@ def main(cfg: DictConfig):
         "hidden_dims": tuple(cfg.network.hidden_dims),
         "activation": cfg.network.activation,
         "layer_norm": cfg.network.get("use_layer_norm", False),
+        "network_type": cfg.network.get("type", "mlp"),
         "lr": cfg.optimization.lr,
         "weight_decay": cfg.optimization.weight_decay,
         "schedule_type": cfg.optimization.lr_schedule.type,
         "warmup_steps": cfg.optimization.lr_schedule.warmup_steps,
         "gradient_steps": cfg.optimization.gradient_steps,
         "interp_type": cfg.flow.interp_type,
-        "flow_type": "flow_matching",  # Use standard flow matching
+        "flow_type": "flow_matching",
         "sampler_type": cfg.flow.sampler.type,
         "flow_steps": cfg.flow.sampler.num_steps,
+        # Store task info for evaluation
+        "dataset_path": str(resolved_path),
+        "env_name": cfg.task.env_name,
+        "obs_type": cfg.task.obs_type,
     }
+
+    # Image mode: auto-set encoder and pass keys
+    if is_image:
+        agent_config["encoder_type"] = "multi_image"
+        agent_config["image_keys"] = tuple(image_keys)
+        agent_config["lowdim_keys"] = tuple(lowdim_keys)
+        crop_shape = cfg.task.dataset.get("crop_shape", None)
+        if crop_shape is not None:
+            agent_config["crop_shape"] = tuple(crop_shape)
+    else:
+        # Store obs_keys for lowdim mode
+        agent_config["obs_keys"] = tuple(cfg.task.dataset.get("obs_keys", [
+            "robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"
+        ]))
 
     rng, agent_rng = jax.random.split(rng)
     agent = BCAgent.create(
@@ -171,6 +237,37 @@ def main(cfg: DictConfig):
     print("Agent created successfully!")
     print(f"Network step: {agent.network.step}")
 
+    # Initialize W&B
+    if cfg.wandb.enabled:
+        try:
+            import wandb
+            wandb.init(
+                project=cfg.wandb.project,
+                entity=cfg.wandb.entity,
+                name=cfg.wandb.name,
+                config=dict(OmegaConf.to_container(cfg, resolve=True)),
+                tags=list(cfg.wandb.tags),
+            )
+            print("\n✓ W&B logging enabled")
+        except ImportError:
+            print("\n✗ W&B not installed, skipping logging")
+            cfg.wandb.enabled = False
+
+    # Prepare normalizers for checkpoint saving
+    normalizers: dict = {
+        "action": train_dataset.action_normalizer,
+    }
+    if is_image:
+        # Image mode: save lowdim normalizer if exists
+        lowdim_norm = getattr(train_dataset, "lowdim_normalizer", None)
+        if lowdim_norm is not None:
+            normalizers["lowdim"] = lowdim_norm
+    else:
+        # Lowdim mode: save obs normalizer
+        obs_norm = getattr(train_dataset, "obs_normalizer", None)
+        if obs_norm is not None:
+            normalizers["obs"] = obs_norm
+
     # Training loop
     print("\n" + "=" * 80)
     print("Training")
@@ -178,6 +275,7 @@ def main(cfg: DictConfig):
 
     best_val_loss = float("inf")
     train_losses = []
+    eval_count = 0
 
     pbar = tqdm(range(cfg.optimization.gradient_steps), desc="Training")
 
@@ -198,21 +296,41 @@ def main(cfg: DictConfig):
                 "grad_norm": f"{float(info['grad/norm']):.4f}",
             })
 
+            # Log to W&B
+            if cfg.wandb.enabled:
+                wandb.log({
+                    "train/loss": avg_loss,
+                    "train/grad_norm": float(info["grad/norm"]),
+                    "train/step": step,
+                }, step=step)
+
         # Validation
         if step % cfg.optimization.eval_freq == 0 and step > 0:
             print(f"\n[Step {step}] Running validation...")
 
             val_losses = []
             for _ in range(min(100, len(val_dataset) // cfg.optimization.batch_size)):
+                # Sample once, use both obs and actions from same batch
+                val_sample = val_dataset.sample_batch(cfg.optimization.batch_size)
+                val_obs = val_sample["observations"]
+                val_act = val_sample["actions"]
+
+                # Convert to jax arrays (handle dict obs)
+                if isinstance(val_obs, dict):
+                    val_obs = {k: jnp.array(v) for k, v in val_obs.items()}
+                else:
+                    val_obs = jnp.array(val_obs)
                 val_batch = {
-                    "observations": jnp.array(val_dataset.sample_batch(cfg.optimization.batch_size)["observations"]),
-                    "actions": jnp.array(val_dataset.sample_batch(cfg.optimization.batch_size)["actions"]),
+                    "observations": val_obs,
+                    "actions": jnp.array(val_act),
                 }
 
                 # Compute loss without updating
                 def val_loss_fn(params):
-                    def encode(obs, training=False):
-                        return agent.network(obs, training=training, name="encoder", params=params)
+                    def encode(obs, training=False, rngs=None):
+                        if rngs is None:
+                            rngs = {}
+                        return agent.network(obs, training=training, name="encoder", params=params, rngs=rngs)
 
                     def flow_net(at, s, t, cond, training=False):
                         return agent.network(at, s, t, cond, training=training, name="flow", params=params)
@@ -232,18 +350,96 @@ def main(cfg: DictConfig):
             avg_val_loss = np.mean(val_losses)
             print(f"Validation loss: {avg_val_loss:.4f}")
 
+            # Log to W&B
+            if cfg.wandb.enabled:
+                wandb.log({
+                    "val/loss": avg_val_loss,
+                }, step=step)
+
             # Save best model
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 checkpoint_path = output_dir / "best_model.pkl"
                 print(f"Saving best model to {checkpoint_path}")
-                # TODO: Implement checkpoint saving
+                save_checkpoint(
+                    checkpoint_path=checkpoint_path,
+                    agent=agent,
+                    step=step,
+                    normalizers=normalizers,
+                    best_val_loss=float(best_val_loss),
+                )
+
+        # Environment evaluation
+        if step % cfg.eval.eval_interval == 0 and step > 0:
+            print(f"\n[Step {step}] Running environment evaluation...")
+            eval_count += 1
+
+            # Create evaluation environment
+            eval_env = make_robomimic_env(
+                env_name=cfg.task.env_name,
+                dataset_path=resolved_path,
+                obs_type=cfg.task.obs_type,
+                obs_keys=tuple(cfg.task.dataset.get("obs_keys", [
+                    "robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"
+                ])),
+                image_keys=tuple(image_keys) if is_image else None,
+                lowdim_keys=tuple(lowdim_keys) if is_image else None,
+                obs_normalizer=normalizers.get("obs"),
+                action_normalizer=normalizers["action"],
+                lowdim_normalizer=normalizers.get("lowdim"),
+                max_episode_steps=cfg.eval.max_episode_steps,
+                frame_stack=cfg.task.dataset.obs_steps,
+                act_exec_steps=cfg.task.dataset.act_steps,
+                seed=cfg.seed,
+            )
+
+            # Run evaluation
+            eval_results = evaluate_policy(
+                agent=agent,
+                env=eval_env,
+                num_episodes=cfg.eval.num_episodes,
+                max_steps=cfg.eval.max_episode_steps,
+                render=cfg.eval.render,
+                save_video=cfg.eval.save_video,
+                num_videos=cfg.eval.num_videos,
+                verbose=True,
+            )
+
+            # Print results
+            print_evaluation_results(eval_results)
+
+            # Log to W&B
+            if cfg.wandb.enabled:
+                wandb.log({
+                    "eval/success_rate": eval_results["success_rate"],
+                    "eval/avg_length": eval_results["avg_length"],
+                    "eval/avg_return": eval_results["avg_return"],
+                }, step=step)
+
+                # Upload videos
+                if cfg.wandb.log_videos and "videos" in eval_results and eval_count % cfg.wandb.log_video_interval == 0:
+                    for i, video_frames in enumerate(eval_results["videos"]):
+                        # video_frames: (T, H, W, C) in uint8
+                        video_frames_transposed = np.transpose(video_frames, (0, 3, 1, 2))  # (T, C, H, W)
+                        wandb.log({
+                            f"eval/video_{i}": wandb.Video(video_frames_transposed, fps=cfg.eval.video_fps, format="mp4")
+                        }, step=step)
 
         # Save checkpoint
-        if step % cfg.optimization.save_freq == 0 and step > 0:
+        if step % cfg.checkpoint.save_freq == 0 and step > 0:
             checkpoint_path = output_dir / f"checkpoint_{step}.pkl"
             print(f"\nSaving checkpoint to {checkpoint_path}")
-            # TODO: Implement checkpoint saving
+            save_checkpoint(
+                checkpoint_path=checkpoint_path,
+                agent=agent,
+                step=step,
+                normalizers=normalizers,
+                best_val_loss=float(best_val_loss) if best_val_loss != float("inf") else None,
+            )
+
+            # Cleanup old checkpoints
+            if cfg.checkpoint.keep_last_n > 0:
+                cleanup_old_checkpoints(output_dir, keep_last_n=cfg.checkpoint.keep_last_n)
 
     print("\n" + "=" * 80)
     print("Training Complete!")
