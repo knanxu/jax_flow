@@ -5,13 +5,14 @@ import jax.numpy as jnp
 
 
 class FourierEmbedding(nn.Module):
-    """Fourier (sinusoidal) timestep embedding.
+    """Uniform-frequency Fourier timestep embedding.
 
-    Used in Diffusion Policy and other flow matching methods.
+    Uses uniformly spaced frequencies from 0 to max_freq (much-ado-about-noising style).
+    For timesteps in [0, 1], computes sin(t * freq) and cos(t * freq).
     """
 
     embed_dim: int = 128
-    max_freq: float = 1000.0
+    max_freq: float = 100.0
 
     @nn.compact
     def __call__(self, timesteps):
@@ -23,18 +24,41 @@ class FourierEmbedding(nn.Module):
         Returns:
             Embeddings. Shape: (batch, embed_dim)
         """
-        # Ensure timesteps is 1D
         timesteps = jnp.atleast_1d(timesteps)
         if timesteps.ndim > 1:
             timesteps = timesteps.squeeze(-1)
 
-        # Compute frequencies
         half_dim = self.embed_dim // 2
-        freqs = jnp.exp(-jnp.log(self.max_freq) * jnp.arange(half_dim) / half_dim)
+        # Uniform frequencies from 0 to max_freq
+        freqs = jnp.linspace(0.0, self.max_freq, half_dim)
 
-        # Compute embeddings
+        angles = timesteps[:, None] * freqs[None, :]
+        embedding = jnp.concatenate([jnp.sin(angles), jnp.cos(angles)], axis=-1)
+
+        return embedding
+
+
+class SinusoidalPosEmb(nn.Module):
+    """Sinusoidal positional embedding (Diffusion Policy / Transformer style).
+
+    Uses exponentially decaying frequencies with base 10000.
+    Standard for UNet timestep conditioning.
+    """
+
+    embed_dim: int = 256
+
+    @nn.compact
+    def __call__(self, timesteps):
+        timesteps = jnp.atleast_1d(timesteps)
+        if timesteps.ndim > 1:
+            timesteps = timesteps.squeeze(-1)
+
+        half_dim = self.embed_dim // 2
+        emb = jnp.log(10000.0) / (half_dim - 1)
+        freqs = jnp.exp(jnp.arange(half_dim) * -emb)
+
         args = timesteps[:, None] * freqs[None, :]
-        embedding = jnp.concatenate([jnp.cos(args), jnp.sin(args)], axis=-1)
+        embedding = jnp.concatenate([jnp.sin(args), jnp.cos(args)], axis=-1)
 
         return embedding
 

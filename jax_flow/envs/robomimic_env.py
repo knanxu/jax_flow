@@ -147,10 +147,16 @@ class RobomimicImageWrapper(gym.Env):
         raw_obs = self.env.get_observation()
         obs = {}
 
-        # Image observations: uint8 -> float32 [0, 1]
+        # Image observations: robomimic returns (C, H, W) float [0, 1], convert to (H, W, C)
         for key in self.image_keys:
             if key in raw_obs:
-                img = raw_obs[key].astype(np.float32) / 255.0
+                img = raw_obs[key]
+                if img.ndim == 3 and img.shape[0] in (1, 3):
+                    img = np.transpose(img, (1, 2, 0))  # CHW -> HWC
+                if img.dtype == np.uint8:
+                    img = img.astype(np.float32) / 255.0
+                else:
+                    img = img.astype(np.float32)
                 obs[key] = img
 
         # Lowdim observations
@@ -380,6 +386,30 @@ def make_robomimic_env(
 
     # Load environment metadata from dataset
     env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path)
+
+    # Fix MimicGen env names: Strip _D0/_D1/_D2 suffix (e.g. Stack_D0 -> Stack)
+    import re
+    raw_env_name = env_meta.get("env_name", "")
+    stripped = re.sub(r"_D\d+$", "", raw_env_name)
+    if stripped != raw_env_name:
+        env_meta["env_name"] = stripped
+
+    # Fix old controller config format for robosuite >= 1.5
+    # MimicGen datasets use flat OSC_POSE config; robosuite 1.5+ needs BASIC composite wrapper
+    env_kwargs = env_meta.get("env_kwargs", {})
+    ctrl_cfg = env_kwargs.get("controller_configs", {})
+    if isinstance(ctrl_cfg, dict) and ctrl_cfg.get("type") == "OSC_POSE":
+        arm_cfg = {k: v for k, v in ctrl_cfg.items() if k != "type"}
+        arm_cfg["type"] = "OSC_POSE"
+        arm_cfg["input_ref_frame"] = arm_cfg.get("input_ref_frame", "world")
+        arm_cfg["gripper"] = arm_cfg.get("gripper", {"type": "GRIP"})
+        env_kwargs["controller_configs"] = {
+            "type": "BASIC",
+            "body_parts": {"right": arm_cfg},
+        }
+        # Remove deprecated keys
+        env_kwargs.pop("render_gpu_device_id", None)
+        env_meta["env_kwargs"] = env_kwargs
 
     # Create environment
     use_image = obs_type == "image"

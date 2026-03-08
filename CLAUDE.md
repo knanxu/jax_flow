@@ -77,28 +77,30 @@ python scripts/eval_bc.py --checkpoint path/to/checkpoint.pkl --render
 
 ### Data Download
 ```bash
-# Lowdim 数据集（支持自动下载）
+# Robomimic lowdim 数据集（支持自动下载）
 python scripts/download_data.py --task square --obs_type lowdim
 
-# Image 数据集方案 1：从 demo 文件生成（robomimic 官方方式）
+# Robomimic image 数据集（从 demo 文件生成）
 python scripts/generate_image_dataset.py --task square --dataset_type ph
 
-# Image 数据集方案 2：从 MimicGen 下载（推荐，如果任务可用）
-python scripts/download_data.py --task stack --obs_type image --source mimicgen
+# MimicGen 数据集（一键下载+转换全部 9 个任务）
+python scripts/download_mimicgen.py
 
-# 批量下载所有数据集
-python scripts/download_all_datasets.py
+# MimicGen 单任务手动下载+转换
+cd ~/.robomimic/mimicgen/core
+wget -c "https://huggingface.co/datasets/amandlek/mimicgen_datasets/resolve/main/core/stack_d0.hdf5"
+python scripts/convert_mimicgen.py --input ~/.robomimic/mimicgen/core/stack_d0.hdf5 --task stack
 
-# 训练时自动下载缺失的 lowdim 数据集
-python scripts/train_bc.py task=square_lowdim  # 会自动检查并下载
+# 批量转换所有已下载的 MimicGen 原始文件
+python scripts/convert_mimicgen.py --all
 ```
 
 **数据源对比**：
 - **Robomimic**: lift, can, square, transport, tool_hang（lowdim 可直接下载，image 需从 demo 生成）
-- **MimicGen**: stack, stack_three, threading, coffee, kitchen 等（lowdim + image 都可直接下载，推荐用于 image）
-- **注意**: MimicGen 没有 square 任务，square 的 image 数据集需要从 robomimic demo 生成
+- **MimicGen**: stack, stack_three, threading, coffee, kitchen, hammer_cleanup, mug_cleanup, pick_place, nut_assembly（HuggingFace 下载 `{task}_d0.hdf5` 后用 `convert_mimicgen.py` 转换）
 
-数据集路径优先级：绝对路径 > 项目相对路径 > ~/.robomimic/ > 自动下载 
+数据集路径优先级：绝对路径 > 项目相对路径 > ~/.robomimic/mimicgen/core/ > ~/.robomimic/ > 自动下载
+DatasetManager 会自动根据 task 名判断数据源（MIMICGEN_TASKS 集合中的任务自动走 mimicgen 路径）
 
 ### Testing
 ```bash
@@ -238,6 +240,9 @@ configs/
 - [x] W&B logging 集成（训练 + eval + 视频上传）
 
 **Phase 5: ACFQL + Extensions**
+- [x] MimicGen 数据集下载+转换支持（`download_mimicgen.py`, `convert_mimicgen.py`）
+- [x] DatasetManager 适配 MimicGen 路径结构，自动检测数据源
+- [x] robomimic_env 兼容 MimicGen 的 env_name 和 controller 格式
 - [ ] 完善 ACFQLAgent
 - [ ] MeanFlow 完整实现 (JVP)
 - [ ] UNet / Transformer networks

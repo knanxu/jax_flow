@@ -23,6 +23,12 @@ class DatasetManager:
         "image": "image_v141.hdf5",
     }
 
+    # MimicGen tasks (stored under ~/.robomimic/mimicgen/core/)
+    MIMICGEN_TASKS = {
+        "stack", "stack_three", "threading", "coffee", "kitchen",
+        "hammer_cleanup", "mug_cleanup", "pick_place", "nut_assembly",
+    }
+
     @staticmethod
     def resolve_dataset_path(
         dataset_path: str,
@@ -35,8 +41,9 @@ class DatasetManager:
         Priority:
         1. Absolute path if exists
         2. Relative to project root if exists
-        3. ~/.robomimic/ directory
-        4. Return expected path for download
+        3. ~/.robomimic/mimicgen/core/{task}/ph/ (MimicGen tasks)
+        4. ~/.robomimic/{task}/ph/ (Robomimic tasks, v15 then v141)
+        5. Return expected path for download
 
         Args:
             dataset_path: Path from config file
@@ -58,17 +65,22 @@ class DatasetManager:
         if rel_path.exists():
             return rel_path
 
-        # Try ~/.robomimic/ directory
         hdf5_type = "low_dim" if obs_type == "lowdim" else "image"
+
+        # Try MimicGen path: ~/.robomimic/mimicgen/core/{task}/{dataset_type}/
+        mimicgen_path = DatasetManager.ROBOMIMIC_DIR / "mimicgen" / "core" / task / dataset_type / f"{hdf5_type}_v141.hdf5"
+        if mimicgen_path.exists():
+            return mimicgen_path
+
+        # Try Robomimic path: ~/.robomimic/{task}/{dataset_type}/
         robomimic_path = DatasetManager.ROBOMIMIC_DIR / task / dataset_type / f"{hdf5_type}_v15.hdf5"
         if robomimic_path.exists():
             return robomimic_path
 
-        # Try v141 for image datasets
-        if obs_type == "image":
-            robomimic_path_v141 = DatasetManager.ROBOMIMIC_DIR / task / dataset_type / "image_v141.hdf5"
-            if robomimic_path_v141.exists():
-                return robomimic_path_v141
+        # Try v141 variant
+        robomimic_v141 = DatasetManager.ROBOMIMIC_DIR / task / dataset_type / f"{hdf5_type}_v141.hdf5"
+        if robomimic_v141.exists():
+            return robomimic_v141
 
         # Return expected path (may not exist yet)
         return path
@@ -110,12 +122,12 @@ class DatasetManager:
         Returns:
             True if successful, False otherwise
         """
-        # Check if already exists
-        hdf5_type = "low_dim" if obs_type == "lowdim" else "image"
-        expected_path = DatasetManager.ROBOMIMIC_DIR / task / dataset_type / f"{hdf5_type}_v15.hdf5"
-
-        if expected_path.exists() and not force:
-            print(f"Dataset already exists at: {expected_path}")
+        # Check if already exists via resolve
+        exists, resolved = DatasetManager.check_dataset_exists(
+            dataset_path="", task=task, dataset_type=dataset_type, obs_type=obs_type
+        )
+        if exists and not force:
+            print(f"Dataset already exists at: {resolved}")
             return True
 
         print(f"\n{'='*80}")
@@ -124,7 +136,6 @@ class DatasetManager:
         print(f"Task: {task}")
         print(f"Dataset type: {dataset_type}")
         print(f"Observation type: {obs_type}")
-        print(f"Target: {expected_path}")
         print(f"{'='*80}\n")
 
         if source == "robomimic":
@@ -209,62 +220,83 @@ class DatasetManager:
 
     @staticmethod
     def _download_mimicgen(task: str, dataset_type: str, obs_type: str) -> bool:
-        """Download from HuggingFace mimicgen datasets."""
-        try:
-            from huggingface_hub import hf_hub_download  # type: ignore
-        except ImportError:
-            print("Error: huggingface_hub not installed. Install with:")
-            print("  pip install huggingface_hub")
+        """Download from HuggingFace mimicgen datasets.
+
+        MimicGen files on HuggingFace are `core/{task}_d0.hdf5` containing both
+        image and lowdim data. We download the raw file, then convert to separate
+        lowdim/image formats using convert_mimicgen.py.
+        """
+        import os
+        import subprocess
+
+        base_dir = DatasetManager.ROBOMIMIC_DIR / "mimicgen"
+        raw_path = base_dir / "core" / f"{task}_d0.hdf5"
+
+        # Step 1: Download raw file if not present
+        if not raw_path.exists():
+            print(f"Downloading {task}_d0.hdf5 from HuggingFace...")
+
+            # Use wget (more reliable than hf_hub_download with proxies)
+            url = f"https://huggingface.co/datasets/amandlek/mimicgen_datasets/resolve/main/core/{task}_d0.hdf5"
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Unset ALL_PROXY to avoid socks proxy issues with some tools
+            env = os.environ.copy()
+            env.pop("ALL_PROXY", None)
+            env.pop("all_proxy", None)
+
+            try:
+                result = subprocess.run(
+                    ["wget", "-c", "-q", "--show-progress", url, "-O", str(raw_path)],
+                    env=env,
+                    check=True,
+                    timeout=3600,
+                )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+                print(f"wget failed ({e}), trying huggingface_hub...")
+                try:
+                    from huggingface_hub import hf_hub_download  # type: ignore
+                    hf_hub_download(
+                        repo_id="amandlek/mimicgen_datasets",
+                        filename=f"core/{task}_d0.hdf5",
+                        repo_type="dataset",
+                        local_dir=str(base_dir),
+                    )
+                except Exception as e2:
+                    print(f"Error: {e2}")
+                    if raw_path.exists():
+                        raw_path.unlink()
+                    return False
+
+        if not raw_path.exists():
+            print(f"Error: raw file not found at {raw_path}")
             return False
 
+        print(f"Raw file: {raw_path} ({raw_path.stat().st_size / 1024**3:.1f} GB)")
+
+        # Step 2: Convert to lowdim/image format
         hdf5_type = "low_dim" if obs_type == "lowdim" else "image"
+        target_path = base_dir / "core" / task / dataset_type / f"{hdf5_type}_v141.hdf5"
 
-        # MimicGen repo structure: core/{task}/{dataset_type}/{hdf5_type}_v141.hdf5
-        filename = f"core/{task}/{dataset_type}/{hdf5_type}_v141.hdf5"
-
-        print(f"Downloading mimicgen dataset from HuggingFace:")
-        print(f"  Filename: {filename}")
-
-        try:
-            import os
-
-            # Check proxy settings
-            if os.environ.get('http_proxy') or os.environ.get('https_proxy'):
-                print(f"  Using proxy from environment variables")
-
-            target_dir = DatasetManager.ROBOMIMIC_DIR / "mimicgen"
-            file_path = hf_hub_download(
-                repo_id="amandlek/mimicgen_datasets",
-                filename=filename,
-                repo_type="dataset",
-                local_dir=str(target_dir),
-            )
-            print(f"\n✓ Download complete!")
-            print(f"✓ Dataset saved to: {file_path}")
-
-            # Create symlink to standard location for easier access
-            standard_path = DatasetManager.ROBOMIMIC_DIR / task / dataset_type / f"{hdf5_type}_v141.hdf5"
-            standard_path.parent.mkdir(parents=True, exist_ok=True)
-
-            if not standard_path.exists():
-                try:
-                    os.symlink(file_path, standard_path)
-                    print(f"✓ Created symlink: {standard_path}")
-                except Exception as e:
-                    print(f"Note: Could not create symlink: {e}")
-
+        if target_path.exists():
+            print(f"Converted file already exists: {target_path}")
             return True
 
-        except Exception as e:
-            print(f"Error during download: {e}")
-            print("\nAvailable MimicGen tasks:")
-            print("  stack, stack_three, threading, coffee, kitchen,")
-            print("  hammer_cleanup, mug_cleanup, pick_place, square, nut_assembly")
-            print("\nNote: Make sure the task name matches exactly")
-            print("\nIf you're behind a proxy, set environment variables:")
-            print("  export http_proxy=http://127.0.0.1:7897")
-            print("  export https_proxy=http://127.0.0.1:7897")
+        print(f"Converting to {obs_type} format...")
+        try:
+            convert_script = Path(__file__).parent.parent.parent / "scripts" / "convert_mimicgen.py"
+            result = subprocess.run(
+                ["python", str(convert_script), "--input", str(raw_path), "--task", task],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            print(result.stdout)
+        except subprocess.CalledProcessError as e:
+            print(f"Conversion failed: {e.stderr}")
             return False
+
+        return target_path.exists()
 
     @staticmethod
     def ensure_dataset(
@@ -302,8 +334,12 @@ class DatasetManager:
             print(f"  python scripts/download_data.py --task {task} --obs_type {obs_type}")
             return None
 
+        # Auto-detect source from task name
+        if source == "robomimic" and task in DatasetManager.MIMICGEN_TASKS:
+            source = "mimicgen"
+
         # Auto-download
-        print(f"✗ Dataset not found, attempting automatic download...")
+        print(f"✗ Dataset not found, attempting automatic download ({source})...")
         success = DatasetManager.download_dataset(
             task=task,
             dataset_type=dataset_type,

@@ -13,13 +13,13 @@ optimizer_kwargs:
 
 # Learning rate schedule
 lr_schedule:
-  type: cosine  # constant, linear, cosine, exponential
+  type: cosine
   warmup_steps: 1000
   total_steps: 300000
   min_lr: 1e-6
 
 # Training parameters
-batch_size: 256
+batch_size: 1024
 gradient_steps: 300000
 grad_clip_norm: 10.0
 
@@ -28,9 +28,9 @@ use_ema: true
 ema_decay: 0.995
 
 # Evaluation and logging
-eval_freq: 5000      # Evaluate every N steps
-save_freq: 10000     # Save checkpoint every N steps
-log_freq: 100        # Log metrics every N steps
+eval_freq: 5000
+save_freq: 10000
+log_freq: 100
 
 # Data loading
 num_workers: 4

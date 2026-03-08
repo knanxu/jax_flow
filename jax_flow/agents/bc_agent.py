@@ -59,7 +59,9 @@ class BCAgent(flax.struct.PyTreeNode):
             hidden_dims=tuple(config.get("encoder_hidden_dims", (256, 256))),
             output_dim=config.get("emb_dim", 256),
             image_keys=tuple(config.get("image_keys", ("agentview_image",))),
-            lowdim_keys=tuple(config.get("lowdim_keys", ("robot0_eef_pos", "robot0_gripper_qpos"))),
+            lowdim_keys=tuple(
+                config.get("lowdim_keys", ("robot0_eef_pos", "robot0_gripper_qpos"))
+            ),
             crop_shape=config.get("crop_shape", None),
         )
 
@@ -68,10 +70,12 @@ class BCAgent(flax.struct.PyTreeNode):
         if network_type == "mlp":
             flow_def = MLP(
                 action_dim=action_dim,
-                hidden_dims=tuple(config.get("hidden_dims", (512, 512, 512))),
-                cond_dim=config.get("emb_dim", 256),
-                activation=config.get("activation", "gelu"),
-                layer_norm=config.get("layer_norm", False),
+                emb_dim=config.get("emb_dim", 512),
+                n_blocks=config.get("n_blocks", 6),
+                expansion_factor=config.get("expansion_factor", 4),
+                dropout=config.get("dropout", 0.1),
+                timestep_embed_dim=config.get("timestep_embed_dim", 128),
+                max_freq=config.get("max_freq", 100.0),
             )
         elif network_type == "unet":
             flow_def = ConditionalUnet1D(
@@ -80,8 +84,8 @@ class BCAgent(flax.struct.PyTreeNode):
                 kernel_size=config.get("kernel_size", 5),
                 n_groups=config.get("n_groups", 8),
                 cond_dim=config.get("emb_dim", 256),
-                timestep_embed_dim=config.get("timestep_embed_dim", 128),
-                cond_predict_scale=config.get("cond_predict_scale", True),
+                timestep_embed_dim=config.get("timestep_embed_dim", 256),
+                cond_predict_scale=config.get("cond_predict_scale", False),
             )
         elif network_type == "transformer":
             flow_def = TransformerForFlow(
@@ -108,10 +112,12 @@ class BCAgent(flax.struct.PyTreeNode):
         if network_type == "mlp":
             flow_def = MLP(
                 action_dim=action_dim,
-                hidden_dims=tuple(config.get("hidden_dims", (512, 512, 512))),
-                cond_dim=actual_cond_dim,
-                activation=config.get("activation", "gelu"),
-                layer_norm=config.get("layer_norm", False),
+                emb_dim=config.get("emb_dim", 512),
+                n_blocks=config.get("n_blocks", 6),
+                expansion_factor=config.get("expansion_factor", 4),
+                dropout=config.get("dropout", 0.1),
+                timestep_embed_dim=config.get("timestep_embed_dim", 128),
+                max_freq=config.get("max_freq", 100.0),
             )
         elif network_type == "unet":
             flow_def = ConditionalUnet1D(
@@ -120,8 +126,8 @@ class BCAgent(flax.struct.PyTreeNode):
                 kernel_size=config.get("kernel_size", 5),
                 n_groups=config.get("n_groups", 8),
                 cond_dim=actual_cond_dim,
-                timestep_embed_dim=config.get("timestep_embed_dim", 128),
-                cond_predict_scale=config.get("cond_predict_scale", True),
+                timestep_embed_dim=config.get("timestep_embed_dim", 256),
+                cond_predict_scale=config.get("cond_predict_scale", False),
             )
         elif network_type == "transformer":
             flow_def = TransformerForFlow(
@@ -197,13 +203,22 @@ class BCAgent(flax.struct.PyTreeNode):
                 if rngs is None:
                     rngs = dropout_rngs
                 return self.network(
-                    obs, training=training, name="encoder", params=params,
+                    obs,
+                    training=training,
+                    name="encoder",
+                    params=params,
                     rngs=rngs,
                 )
 
             def flow_net(at, s, t, cond, training=True):
                 return self.network(
-                    at, s, t, cond, training=training, name="flow", params=params,
+                    at,
+                    s,
+                    t,
+                    cond,
+                    training=training,
+                    name="flow",
+                    params=params,
                     rngs=dropout_rngs,
                 )
 

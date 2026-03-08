@@ -23,7 +23,7 @@ env:
   max_episode_steps: 400
 
 # Observation and action dimensions
-obs_dim: 39
+obs_dim: 66            # robot0_eef_pos(3) + robot0_eef_quat(4) + robot0_gripper_qpos(2) + object(57)
 act_dim: 7
 
 # Observation keys to use

@@ -1,33 +1,64 @@
-"""MLP network for flow matching."""
+"""MLP network for flow matching with residual blocks.
+
+Architecture follows IDQLMlp / much-ado-about-noising pattern:
+- Input projection: concat(action_flat, s_emb, t_emb, obs) -> Dense -> emb_dim
+- N residual blocks: LayerNorm -> Dense(d, 4d) -> GELU -> Dropout -> Dense(4d, d) -> Dropout + residual
+- Output: LayerNorm -> Dense(emb_dim, horizon * action_dim)
+"""
 
 import flax.linen as nn
 import jax.numpy as jnp
 
-from jax_flow.core.utils import get_activation
 from jax_flow.networks.embeddings import FourierEmbedding
 
 
-class MLP(nn.Module):
-    """Multi-layer perceptron for flow matching.
+class MLPResidualBlock(nn.Module):
+    """Residual block with pre-norm LayerNorm and expansion factor.
 
-    Takes (at, s, t, obs) and outputs velocity field.
-    Supports action sequences with horizon dimension.
+    Structure: LayerNorm -> Dense(d -> expansion*d) -> GELU -> Dropout
+               -> Dense(expansion*d -> d) -> Dropout -> + residual
+    """
+
+    dim: int
+    expansion_factor: int = 4
+    dropout: float = 0.1
+
+    @nn.compact
+    def __call__(self, x, training=False):
+        residual = x
+        x = nn.LayerNorm()(x)
+        x = nn.Dense(self.dim * self.expansion_factor)(x)
+        x = nn.gelu(x)
+        if self.dropout > 0.0:
+            x = nn.Dropout(rate=self.dropout, deterministic=not training)(x)
+        x = nn.Dense(self.dim)(x)
+        if self.dropout > 0.0:
+            x = nn.Dropout(rate=self.dropout, deterministic=not training)(x)
+        return x + residual
+
+
+class MLP(nn.Module):
+    """MLP for flow matching with residual blocks.
 
     Network signature: (at, s, t, obs) -> velocity
-    - at: (batch, horizon, action_dim) - action sequence
-    - s: (batch,) - start time
-    - t: (batch,) - end time
-    - obs: (batch, cond_dim) - observation encoding
-    - velocity: (batch, horizon, action_dim) - predicted velocity field
+    - at: (batch, horizon, action_dim)
+    - s, t: (batch,) timesteps
+    - obs: (batch, cond_dim) observation encoding
+    - velocity: (batch, horizon, action_dim)
     """
 
     action_dim: int
-    hidden_dims: tuple[int, ...] = (512, 512, 512)
-    cond_dim: int = 256
+    emb_dim: int = 512
+    n_blocks: int = 6
+    expansion_factor: int = 4
+    dropout: float = 0.1
+    timestep_embed_dim: int = 128
+    max_freq: float = 100.0
+    # Legacy compat: these are ignored but accepted so old configs don't break
+    hidden_dims: tuple[int, ...] = ()
+    cond_dim: int = 0
     activation: str = "gelu"
     layer_norm: bool = False
-    dropout: float = 0.0
-    timestep_embed_dim: int = 128
 
     @nn.compact
     def __call__(self, at, s, t, obs, training=False):
@@ -35,8 +66,8 @@ class MLP(nn.Module):
 
         Args:
             at: Current action state. Shape: (batch, horizon, action_dim)
-            s: Start time. Shape: (batch,) or (batch, 1)
-            t: End time. Shape: (batch,) or (batch, 1)
+            s: Start time. Shape: (batch,)
+            t: End time. Shape: (batch,)
             obs: Observation encoding. Shape: (batch, cond_dim)
             training: Whether in training mode.
 
@@ -44,64 +75,59 @@ class MLP(nn.Module):
             Velocity field. Shape: (batch, horizon, action_dim)
         """
         batch_size, horizon, action_dim = at.shape
-        act_fn = get_activation(self.activation)
 
-        # Embed timesteps
-        s_emb = FourierEmbedding(embed_dim=self.timestep_embed_dim, name='s_embed')(s)
-        t_emb = FourierEmbedding(embed_dim=self.timestep_embed_dim, name='t_embed')(t)
+        # Embed timesteps with uniform-frequency Fourier features
+        s_emb = FourierEmbedding(
+            embed_dim=self.timestep_embed_dim, max_freq=self.max_freq, name="s_embed"
+        )(s)
+        t_emb = FourierEmbedding(
+            embed_dim=self.timestep_embed_dim, max_freq=self.max_freq, name="t_embed"
+        )(t)
 
         # Flatten action sequence and concatenate all inputs
         at_flat = at.reshape(batch_size, -1)  # (batch, horizon * action_dim)
         h = jnp.concatenate([at_flat, s_emb, t_emb, obs], axis=-1)
 
-        # MLP layers
-        for i, dim in enumerate(self.hidden_dims):
-            h = nn.Dense(dim, name=f'dense_{i}')(h)
-            if self.layer_norm:
-                h = nn.LayerNorm(name=f'ln_{i}')(h)
-            h = act_fn(h)
-            if self.dropout > 0.0 and training:
-                h = nn.Dropout(rate=self.dropout, deterministic=not training)(h)
+        # Input projection
+        h = nn.Dense(self.emb_dim, name="input_proj")(h)
+        h = nn.LayerNorm(name="input_ln")(h)
+        h = nn.gelu(h)
 
-        # Output layer
+        # Residual blocks
+        for i in range(self.n_blocks):
+            h = MLPResidualBlock(
+                dim=self.emb_dim,
+                expansion_factor=self.expansion_factor,
+                dropout=self.dropout,
+                name=f"block_{i}",
+            )(h, training=training)
+
+        # Output projection
+        h = nn.LayerNorm(name="output_ln")(h)
         output_dim = horizon * action_dim
-        velocity_flat = nn.Dense(output_dim, name='output')(h)
+        velocity_flat = nn.Dense(output_dim, name="output_proj")(h)
 
-        # Reshape to (batch, horizon, action_dim)
         velocity = velocity_flat.reshape(batch_size, horizon, action_dim)
-
         return velocity
 
 
 def create_mlp(
     action_dim,
-    hidden_dims=(512, 512, 512),
-    cond_dim=256,
-    activation="gelu",
-    layer_norm=False,
-    dropout=0.0,
+    emb_dim=512,
+    n_blocks=6,
+    expansion_factor=4,
+    dropout=0.1,
     timestep_embed_dim=128,
+    max_freq=100.0,
+    **kwargs,
 ):
-    """Factory function to create MLP network.
-
-    Args:
-        action_dim: Action dimension (per timestep).
-        hidden_dims: Hidden layer dimensions.
-        cond_dim: Condition dimension (observation encoding).
-        activation: Activation function.
-        layer_norm: Whether to use layer normalization.
-        dropout: Dropout rate.
-        timestep_embed_dim: Timestep embedding dimension.
-
-    Returns:
-        MLP module.
-    """
+    """Factory function to create MLP network."""
     return MLP(
         action_dim=action_dim,
-        hidden_dims=hidden_dims,
-        cond_dim=cond_dim,
-        activation=activation,
-        layer_norm=layer_norm,
+        emb_dim=emb_dim,
+        n_blocks=n_blocks,
+        expansion_factor=expansion_factor,
         dropout=dropout,
         timestep_embed_dim=timestep_embed_dim,
+        max_freq=max_freq,
     )

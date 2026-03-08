@@ -3,7 +3,7 @@
 defaults:
   - task: lift_lowdim
   - network: mlp
-  - flow: meanflow
+  - flow: flow_matching
   - optimization: default
   - _self_
 

@@ -193,19 +193,24 @@ def main(cfg: DictConfig):
         "encoder_type": cfg.get("encoder_type", "identity"),
         "encoder_hidden_dims": tuple(cfg.network.get("encoder_hidden_dims", [256, 256])),
         "emb_dim": cfg.network.emb_dim,
-        "hidden_dims": tuple(cfg.network.hidden_dims),
-        "activation": cfg.network.activation,
-        "layer_norm": cfg.network.get("use_layer_norm", False),
-        "network_type": cfg.network.get("type", "mlp"),
+        # MLP residual block params
+        "n_blocks": cfg.network.get("n_blocks", 6),
+        "expansion_factor": cfg.network.get("expansion_factor", 4),
+        "dropout": cfg.network.get("dropout", 0.1),
+        "timestep_embed_dim": cfg.network.get("timestep_emb_dim", 128),
+        "max_freq": cfg.network.get("max_freq", 100.0),
+        "network_type": cfg.network.get("network_type", "mlp"),
         "lr": cfg.optimization.lr,
         "weight_decay": cfg.optimization.weight_decay,
         "schedule_type": cfg.optimization.lr_schedule.type,
         "warmup_steps": cfg.optimization.lr_schedule.warmup_steps,
         "gradient_steps": cfg.optimization.gradient_steps,
         "interp_type": cfg.flow.interp_type,
-        "flow_type": "flow_matching",
+        "flow_type": cfg.flow.get("policy_type", "flow_matching"),
         "sampler_type": cfg.flow.sampler.type,
         "flow_steps": cfg.flow.sampler.num_steps,
+        "sample_mode": cfg.flow.sampler.get("sample_mode", "stochastic"),
+        "loss_scale": cfg.flow.loss.get("scale", 0.1),
         # Store task info for evaluation
         "dataset_path": str(resolved_path),
         "env_name": cfg.task.env_name,
@@ -302,6 +307,7 @@ def main(cfg: DictConfig):
                     "train/loss": avg_loss,
                     "train/grad_norm": float(info["grad/norm"]),
                     "train/step": step,
+                    "train/lr": float(info.get("lr", cfg.optimization.lr)),
                 }, step=step)
 
         # Validation
@@ -325,15 +331,19 @@ def main(cfg: DictConfig):
                     "actions": jnp.array(val_act),
                 }
 
-                # Compute loss without updating
+                # Compute loss without updating (use dropout rng for consistency)
+                val_rng = jax.random.PRNGKey(step)
+                val_dropout_rng, val_crop_rng = jax.random.split(val_rng)
+                val_rngs = {"dropout": val_dropout_rng, "crop": val_crop_rng}
+
                 def val_loss_fn(params):
                     def encode(obs, training=False, rngs=None):
                         if rngs is None:
-                            rngs = {}
+                            rngs = val_rngs
                         return agent.network(obs, training=training, name="encoder", params=params, rngs=rngs)
 
                     def flow_net(at, s, t, cond, training=False):
-                        return agent.network(at, s, t, cond, training=training, name="flow", params=params)
+                        return agent.network(at, s, t, cond, training=training, name="flow", params=params, rngs=val_rngs)
 
                     return agent.loss_fn_type(
                         network=flow_net,
@@ -410,11 +420,20 @@ def main(cfg: DictConfig):
 
             # Log to W&B
             if cfg.wandb.enabled:
-                wandb.log({
+                eval_log = {
                     "eval/success_rate": eval_results["success_rate"],
+                    "eval/num_successes": eval_results["num_successes"],
                     "eval/avg_length": eval_results["avg_length"],
+                    "eval/std_length": eval_results["std_length"],
                     "eval/avg_return": eval_results["avg_return"],
-                }, step=step)
+                    "eval/std_return": eval_results["std_return"],
+                }
+                if "action_mean" in eval_results:
+                    eval_log["eval/action_mean"] = eval_results["action_mean"]
+                    eval_log["eval/action_std"] = eval_results["action_std"]
+                    eval_log["eval/action_abs_mean"] = eval_results["action_abs_mean"]
+                    eval_log["eval/action_clip_ratio"] = eval_results["action_clip_ratio"]
+                wandb.log(eval_log, step=step)
 
                 # Upload videos
                 if cfg.wandb.log_videos and "videos" in eval_results and eval_count % cfg.wandb.log_video_interval == 0:

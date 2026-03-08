@@ -10,13 +10,14 @@ interp_type: linear  # linear or trigonometric
 sampler:
   type: euler
   num_steps: 10      # Number of ODE integration steps
+  sample_mode: stochastic  # stochastic (gaussian) or zero
   deterministic: true
   adaptive_step: false
 
 # Loss computation
 loss:
   norm_type: l2       # l2 or l1
-  scale: 1.0          # Loss scale factor
+  scale: 0.1          # Loss scale factor
 
 # Training specific
 use_ema: true         # Use EMA for target network

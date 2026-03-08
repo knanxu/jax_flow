@@ -36,7 +36,7 @@ class Conv1dBlock(nn.Module):
         x = nn.Conv(
             features=self.out_channels,
             kernel_size=(self.kernel_size,),
-            padding='SAME',
+            padding="SAME",
         )(x)
         # Transpose back to (batch, channels, horizon)
         x = jnp.transpose(x, (0, 2, 1))
@@ -72,7 +72,7 @@ class Downsample1d(nn.Module):
             features=self.out_channels,
             kernel_size=(3,),
             strides=(2,),
-            padding='SAME',
+            padding="SAME",
         )(x)
         # (batch, horizon//2, channels) -> (batch, channels, horizon//2)
         x = jnp.transpose(x, (0, 2, 1))
@@ -100,7 +100,7 @@ class Upsample1d(nn.Module):
             features=self.out_channels,
             kernel_size=(4,),
             strides=(2,),
-            padding='SAME',
+            padding="SAME",
         )(x)
         # (batch, horizon*2, channels) -> (batch, channels, horizon*2)
         x = jnp.transpose(x, (0, 2, 1))
@@ -139,22 +139,20 @@ class ConditionalResidualBlock1D(nn.Module):
             out_channels=self.out_channels,
             kernel_size=self.kernel_size,
             n_groups=self.n_groups,
-            name='conv1',
+            name="conv1",
         )(x)
 
-        # FiLM conditioning
+        # FiLM conditioning (Diffusion Policy: Mish -> Linear -> reshape)
+        cond_act = cond * jnp.tanh(nn.softplus(cond))  # Mish activation on cond
         if self.cond_predict_scale:
-            # Predict scale and bias
             cond_channels = self.out_channels * 2
-            cond_params = nn.Dense(cond_channels, name='cond_dense')(cond)
+            cond_params = nn.Dense(cond_channels, name="cond_dense")(cond_act)
             scale, bias = jnp.split(cond_params, 2, axis=-1)
-            # Reshape for broadcasting: (batch, channels) -> (batch, channels, 1)
             scale = scale[:, :, None]
             bias = bias[:, :, None]
             out = scale * out + bias
         else:
-            # Predict bias only
-            bias = nn.Dense(self.out_channels, name='cond_dense')(cond)
+            bias = nn.Dense(self.out_channels, name="cond_dense")(cond_act)
             bias = bias[:, :, None]
             out = out + bias
 
@@ -162,14 +160,16 @@ class ConditionalResidualBlock1D(nn.Module):
             out_channels=self.out_channels,
             kernel_size=self.kernel_size,
             n_groups=self.n_groups,
-            name='conv2',
+            name="conv2",
         )(out)
 
         # Residual connection (with projection if channels differ)
         if x.shape[1] != self.out_channels:
             # 1x1 conv for channel matching
             residual = jnp.transpose(x, (0, 2, 1))
-            residual = nn.Conv(features=self.out_channels, kernel_size=(1,), name='residual_conv')(residual)
+            residual = nn.Conv(
+                features=self.out_channels, kernel_size=(1,), name="residual_conv"
+            )(residual)
             residual = jnp.transpose(residual, (0, 2, 1))
         else:
             residual = x

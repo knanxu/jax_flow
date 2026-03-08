@@ -48,51 +48,116 @@ pip install -e .[robomimic]
 
 ## 数据准备
 
+项目支持两类数据源：**Robomimic**（5 个任务）和 **MimicGen**（9 个任务）。所有数据统一存放在 `~/.robomimic/` 目录下。
+
+### 数据源对比
+
+| 数据源 | 任务 | Lowdim | Image | 说明 |
+|--------|------|--------|-------|------|
+| Robomimic | lift, can, square, transport, tool_hang | 直接下载 | 需从 demo 生成 | robomimic 官方数据 |
+| MimicGen | stack, stack_three, threading, coffee, kitchen, hammer_cleanup, mug_cleanup, pick_place, nut_assembly | 下载+转换 | 下载+转换 | HuggingFace 上的 MimicGen 数据 |
+
+### 数据目录结构
+
+```
+~/.robomimic/
+├── lift/ph/low_dim_v15.hdf5          # Robomimic lowdim
+├── square/ph/low_dim_v15.hdf5
+├── square/ph/image_v141.hdf5         # Robomimic image (从 demo 生成)
+├── ...
+└── mimicgen/core/
+    ├── stack_d0.hdf5                 # MimicGen 原始文件 (image+lowdim)
+    ├── stack/ph/
+    │   ├── low_dim_v141.hdf5         # 转换后的 lowdim
+    │   └── image_v141.hdf5           # symlink -> stack_d0.hdf5
+    ├── coffee_d0.hdf5
+    ├── coffee/ph/
+    │   ├── low_dim_v141.hdf5
+    │   └── image_v141.hdf5
+    └── ...
+```
+
 ### Robomimic 数据集
 
-项目支持自动下载 Robomimic 数据集到 `~/.robomimic/datasets/` 目录。
-
-**方法 1: 训练时自动下载（推荐）**
-
 ```bash
-# 训练时会自动检查并下载缺失的数据集
+# 方法 1: 训练时自动下载 lowdim 数据集
 python scripts/train_bc.py task=square_lowdim
-```
 
-**方法 2: 手动下载**
-
-```bash
-# 下载单个任务的 lowdim 数据集
+# 方法 2: 手动下载
 python scripts/download_data.py --task square --obs_type lowdim
 
-# 下载 image 数据集（从 MimicGen，如果可用）
-python scripts/download_data.py --task stack --obs_type image --source mimicgen
-
-# 批量下载所有数据集
-python scripts/download_all_datasets.py
-```
-
-**支持的任务**:
-- **Robomimic**: lift, can, square, transport, tool_hang
-- **MimicGen**: stack, stack_three, threading, coffee, kitchen, hammer_cleanup, mug_cleanup, nut_assembly, pick_place
-
-**数据集类型**:
-- `lowdim`: 低维状态观测（机器人关节位置、末端执行器位置等）
-- `image`: 图像观测（需要从 demo 文件生成或从 MimicGen 下载）
-
-### 生成 Image 数据集
-
-对于 Robomimic 任务（如 square, lift），image 数据集需要从 demo 文件生成：
-
-```bash
-# 步骤 1: 确保已有 demo 文件（或自动下载）
-python scripts/download_data.py --task square --obs_type lowdim
-
-# 步骤 2: 生成 image 数据集
+# 生成 image 数据集（Robomimic 的 image 数据不能直接下载，需从 demo 生成）
 python scripts/generate_image_dataset.py --task square --dataset_type ph
 ```
 
-**注意**: MimicGen 任务的 image 数据集可以直接下载，无需生成。
+### MimicGen 数据集
+
+MimicGen 数据在 HuggingFace 上以 `core/{task}_d0.hdf5` 格式存储，每个文件同时包含 image 和 lowdim 数据。需要先下载原始文件，再转换为项目使用的 lowdim/image 分离格式。
+
+**完整流程（推荐）：**
+
+```bash
+# 一键下载全部 9 个 MimicGen 任务并转换
+python scripts/download_mimicgen.py
+```
+
+**逐步操作：**
+
+```bash
+# 步骤 1: 下载原始文件（以 stack 为例，约 1.1GB）
+cd ~/.robomimic/mimicgen/core
+wget -c "https://huggingface.co/datasets/amandlek/mimicgen_datasets/resolve/main/core/stack_d0.hdf5"
+
+# 步骤 2: 转换为 lowdim/image 格式
+python scripts/convert_mimicgen.py --input ~/.robomimic/mimicgen/core/stack_d0.hdf5 --task stack
+
+# 或批量转换所有已下载的文件
+python scripts/convert_mimicgen.py --all
+
+# 重新转换（如脚本更新后需要刷新）
+python scripts/convert_mimicgen.py --all --force
+```
+
+**代理设置：** 如果使用代理下载，注意 `ALL_PROXY=socks://...` 会导致 huggingface_hub 报错，建议用 wget 下载或临时取消 `ALL_PROXY`：
+
+```bash
+ALL_PROXY= all_proxy= wget -c "https://huggingface.co/datasets/amandlek/mimicgen_datasets/resolve/main/core/stack_d0.hdf5"
+```
+
+**各任务原始文件大小参考：**
+
+| 任务 | 大小 | 任务 | 大小 |
+|------|------|------|------|
+| stack | 1.1 GB | coffee | 1.9 GB |
+| threading | 1.7 GB | stack_three | 2.4 GB |
+| hammer_cleanup | 3.1 GB | mug_cleanup | 3.2 GB |
+| nut_assembly | 3.4 GB | kitchen | 7.5 GB |
+| pick_place | 9.0 GB | **总计** | **~33 GB** |
+
+### MimicGen 环境依赖
+
+MimicGen 特有的环境（Coffee, Kitchen, Threading 等）需要安装 mimicgen 包：
+
+```bash
+pip install "mimicgen @ git+https://github.com/NVlabs/mimicgen.git"
+```
+
+注意：部分 MimicGen 环境可能与当前 robosuite 版本（1.5.x）存在兼容性问题。基础环境（Stack, NutAssembly, PickPlace）可直接使用，框架会自动处理 MimicGen 数据中的环境名称映射（如 `Stack_D0` → `Stack`）和 controller 配置格式转换。
+
+**环境可用性：**
+
+| 环境评估可用 | 仅训练可用（环境评估需 mimicgen 兼容 robosuite 1.5） |
+|-------------|----------------------------------------------|
+| stack, nut_assembly, pick_place | stack_three, threading, coffee, kitchen, hammer_cleanup, mug_cleanup |
+
+### 数据集路径解析优先级
+
+`DatasetManager` 按以下顺序查找数据集：
+1. 绝对路径（如果存在）
+2. 项目根目录的相对路径
+3. `~/.robomimic/mimicgen/core/{task}/ph/`（MimicGen 任务）
+4. `~/.robomimic/{task}/ph/`（Robomimic 任务，v15 然后 v141）
+5. 返回配置中的路径（可能不存在，触发自动下载）
 
 ## 快速开始
 
