@@ -8,8 +8,8 @@ interp_type: linear  # linear or trigonometric
 
 # Sampler configuration
 sampler:
-  type: euler
-  num_steps: 1       # MeanFlow can do one-step sampling
+  type: meanflow
+  num_steps: 1       # MeanFlow uses single-step sampling
   deterministic: true
   adaptive_step: false
 
@@ -29,7 +29,7 @@ adaptive_weight:
 loss:
   use_stopgrad: true  # Use stop_gradient in Jacobian computation
   norm_type: l2       # l2 or l1
-  scale: 1.0          # Loss scale factor
+  scale: 0.1          # Loss scale factor
 
 # Training specific
 use_ema: true         # Use EMA for target network

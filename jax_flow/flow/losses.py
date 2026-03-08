@@ -41,7 +41,9 @@ def flow_loss(network, encoder, interpolant, batch, rng, config):
     x1 = actions
 
     # Encode observations
-    cond = encoder(observations, training=True, rngs={"crop": crop_rng})  # (batch, cond_dim)
+    cond = encoder(
+        observations, training=True, rngs={"crop": crop_rng}
+    )  # (batch, cond_dim)
 
     # Interpolate
     x_t = interpolant.interpolate(t, x0, x1)  # (batch, horizon, action_dim)
@@ -54,7 +56,7 @@ def flow_loss(network, encoder, interpolant, batch, rng, config):
 
     # Compute loss
     loss = jnp.mean((predicted_velocity - target_velocity) ** 2)
-    loss = loss * config.get("loss_scale", 1.0)
+    loss = loss * config.get("loss_scale", 0.1)
 
     info = {
         "loss": loss,
@@ -110,7 +112,7 @@ def mip_loss(network, encoder, interpolant, batch, rng, config):
     loss1 = jnp.mean((pred_step1 - actions) ** 2) / (t_two_step**2)
     loss2 = jnp.mean((pred_step2 - actions) ** 2) / ((1 - t_two_step) ** 2)
 
-    loss = (loss1 + loss2) * config.get("loss_scale", 1.0)
+    loss = (loss1 + loss2) * config.get("loss_scale", 0.1)
 
     info = {
         "loss": loss,
@@ -122,24 +124,54 @@ def mip_loss(network, encoder, interpolant, batch, rng, config):
     return loss, info
 
 
-def mf_loss(network, encoder, interpolant, batch, rng, config):
-    """Mean Flow (MF) loss.
+def _sample_logit_normal_times(rng, batch_size, mu=-0.4, sigma=1.0, ratio_equal=0.25):
+    """Sample (s, t) pairs using logit-normal distribution.
 
-    Combines standard flow matching with mean flow regularization.
+    Draws two values from N(mu, sigma), maps through sigmoid to (0,1),
+    and assigns the smaller to s and larger to t. A fraction ratio_equal
+    of samples have s=t (degenerating to standard flow matching).
+
+    Returns:
+        s, t: Arrays of shape (batch_size,) with 0 < s <= t < 1.
+    """
+    rng_z, rng_mask = jax.random.split(rng)
+
+    # Sample two values per batch element from N(mu, sigma)
+    z = jax.random.normal(rng_z, (batch_size, 2)) * sigma + mu
+    times = jax.nn.sigmoid(z)  # (batch_size, 2), values in (0, 1)
+
+    # Sort so s <= t
+    s = jnp.minimum(times[:, 0], times[:, 1])
+    t = jnp.maximum(times[:, 0], times[:, 1])
+
+    # With probability ratio_equal, set s = t (standard FM regime)
+    mask = jax.random.uniform(rng_mask, (batch_size,)) < ratio_equal
+    s = jnp.where(mask, t, s)
+
+    return s, t
+
+
+def mf_loss(network, encoder, interpolant, batch, rng, config):
+    """Mean Flow loss with JVP-based Jacobian computation.
+
+    Core equation (t=0 noise, t=1 data, network input x_s):
+        u, duds = jvp(u_theta(x, s, t, cond), primals=(x_s, s, t), tangents=(v_s, 1, 0))
+        u_target = v_s + (t - s) * duds
+        loss = mean((u - stop_gradient(u_target))^2)
 
     Args:
-        network: Flow network.
+        network: Flow network with signature (at, s, t, cond, training).
         encoder: Observation encoder.
-        interpolant: Interpolant.
-        batch: Batch of data.
+        interpolant: Interpolant for x0 -> x1.
+        batch: Batch of data with 'observations' and 'actions'.
         rng: Random key.
-        config: Configuration dict.
+        config: Configuration dict with time_sampling and adaptive_weight params.
 
     Returns:
         Tuple of (loss, info_dict).
     """
     observations = batch["observations"]
-    actions = batch["actions"]
+    actions = batch["actions"]  # (batch, horizon, action_dim)
 
     batch_size = get_batch_size(observations)
     horizon = actions.shape[1]
@@ -149,37 +181,66 @@ def mf_loss(network, encoder, interpolant, batch, rng, config):
     rng, crop_rng = jax.random.split(rng)
     cond = encoder(observations, training=True, rngs={"crop": crop_rng})
 
-    # ========== Standard flow matching loss ==========
-    rng, t_rng = jax.random.split(rng)
-    t_flow = jax.random.uniform(t_rng, (batch_size,), minval=0.0, maxval=1.0)
-
+    # Sample noise
     rng, noise_rng = jax.random.split(rng)
     x0 = jax.random.normal(noise_rng, (batch_size, horizon, action_dim))
     x1 = actions
 
-    x_t = interpolant.interpolate(t_flow, x0, x1)
-    target_velocity = interpolant.velocity(t_flow, x0, x1)
+    # Sample (s, t) pairs via logit-normal distribution
+    time_cfg = config.get("time_sampling", {})
+    mu = time_cfg.get("mu", -0.4)
+    sigma = time_cfg.get("sigma", 1.0)
+    ratio_equal = time_cfg.get("ratio_equal", 0.25)
 
-    # Predict velocities
-    pred_velocity = network(x_t, t_flow, t_flow, cond, training=True)
+    rng, time_rng = jax.random.split(rng)
+    s, t = _sample_logit_normal_times(time_rng, batch_size, mu, sigma, ratio_equal)
 
-    flow_matching_loss = jnp.mean((pred_velocity - target_velocity) ** 2)
+    # Construct x_s and v_s from interpolant
+    x_s = interpolant.interpolate(s, x0, x1)   # (batch, horizon, action_dim)
+    v_s = interpolant.velocity(s, x0, x1)       # (batch, horizon, action_dim)
 
-    # ========== Mean flow term ==========
-    # Compute mean flow regularization (simplified version)
-    # This is a placeholder - full MF loss requires JVP computation
-    # For now, just use flow matching loss
-    mf_term = jnp.zeros_like(flow_matching_loss)
+    # ========== JVP computation ==========
+    # Wrap network into a pure function of (x, s_arg, t_arg) with cond captured
+    def net_fn(x, s_arg, t_arg):
+        return network(x, s_arg, t_arg, cond, training=True)
 
-    total_loss = (flow_matching_loss + mf_term) * config.get("loss_scale", 1.0)
+    # Primals: (x_s, s, t)
+    # Tangents: (v_s, ones, zeros) — differentiate w.r.t. s only
+    primals = (x_s, s, t)
+    tangents = (v_s, jnp.ones((batch_size,)), jnp.zeros((batch_size,)))
+
+    u, duds = jax.jvp(net_fn, primals, tangents)
+
+    # ========== Target computation ==========
+    # u_target = v_s + (t - s) * duds
+    # Broadcast (t - s) from (batch,) to (batch, horizon, action_dim)
+    ts_diff = (t - s)[:, None, None]
+    u_target = v_s + ts_diff * duds
+
+    # ========== Loss ==========
+    error_sq = (u - jax.lax.stop_gradient(u_target)) ** 2
+
+    # Adaptive weighting: w = 1 / (error^2 + c)^p
+    aw_cfg = config.get("adaptive_weight", {})
+    if aw_cfg.get("enabled", False):
+        c = aw_cfg.get("c", 0.01)
+        p = aw_cfg.get("p", 1.0)
+        per_sample_error = jnp.mean(error_sq, axis=(1, 2))  # (batch,)
+        w = 1.0 / (per_sample_error + c) ** p
+        w = jax.lax.stop_gradient(w)
+        loss = jnp.mean(w * per_sample_error)
+    else:
+        loss = jnp.mean(error_sq)
+
+    loss = loss * config.get("loss_scale", 0.1)
 
     info = {
-        "loss": total_loss,
-        "flow_loss": flow_matching_loss,
-        "mf_term": mf_term,
+        "loss": loss,
+        "mf_loss": loss,
+        "mean_error": jnp.mean(error_sq),
     }
 
-    return total_loss, info
+    return loss, info
 
 
 def get_loss_fn(loss_type="flow"):

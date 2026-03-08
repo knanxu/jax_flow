@@ -15,7 +15,7 @@ def euler_sampler(network, encoder, observations, num_steps, rng, config):
         observations: Observations. Shape: (batch, obs_steps, obs_dim) or dict.
         num_steps: Number of ODE steps.
         rng: Random key.
-        config: Configuration dict.
+        config: Configuration dict. Supports 'sample_mode': 'stochastic' (default) or 'zero'.
 
     Returns:
         Sampled actions. Shape: (batch, horizon, action_dim)
@@ -23,22 +23,22 @@ def euler_sampler(network, encoder, observations, num_steps, rng, config):
     batch_size = get_batch_size(observations)
     horizon = config.get("horizon", 10)
     action_dim = config.get("action_dim", 7)
+    sample_mode = config.get("sample_mode", "stochastic")
 
-    # Encode observations (no crop rng needed for inference - uses center crop)
+    # Encode observations
     cond = encoder(observations, training=False, rngs={})
 
-    # Initialize from noise
-    x = jax.random.normal(rng, (batch_size, horizon, action_dim))
+    # Initialize from noise or zeros
+    if sample_mode == "zero":
+        x = jnp.zeros((batch_size, horizon, action_dim))
+    else:
+        x = jax.random.normal(rng, (batch_size, horizon, action_dim))
 
-    # Euler integration
+    # Euler integration from t=0 to t=1
     dt = 1.0 / num_steps
     for step in range(num_steps):
         t = jnp.full((batch_size,), step * dt)
-
-        # Predict velocity (network handles horizon dimension)
         velocity = network(x, t, t, cond, training=False)
-
-        # Euler step
         x = x + velocity * dt
 
     return x
@@ -61,29 +61,23 @@ def heun_sampler(network, encoder, observations, num_steps, rng, config):
     batch_size = get_batch_size(observations)
     horizon = config.get("horizon", 10)
     action_dim = config.get("action_dim", 7)
+    sample_mode = config.get("sample_mode", "stochastic")
 
-    # Encode observations (no crop rng needed for inference - uses center crop)
     cond = encoder(observations, training=False, rngs={})
 
-    # Initialize from noise
-    x = jax.random.normal(rng, (batch_size, horizon, action_dim))
+    if sample_mode == "zero":
+        x = jnp.zeros((batch_size, horizon, action_dim))
+    else:
+        x = jax.random.normal(rng, (batch_size, horizon, action_dim))
 
-    # Heun integration
     dt = 1.0 / num_steps
     for step in range(num_steps):
         t = jnp.full((batch_size,), step * dt)
         t_next = jnp.full((batch_size,), (step + 1) * dt)
 
-        # First velocity estimate
         v1 = network(x, t, t, cond, training=False)
-
-        # Predictor step
         x_pred = x + v1 * dt
-
-        # Second velocity estimate
         v2 = network(x_pred, t_next, t_next, cond, training=False)
-
-        # Corrector step (average of two velocities)
         x = x + (v1 + v2) * 0.5 * dt
 
     return x
@@ -96,7 +90,8 @@ def mip_sampler(network, encoder, observations, num_steps, rng, config):
         network: Flow network.
         encoder: Observation encoder.
         observations: Observations.
-        rng: Random key (unused for MIP).
+        num_steps: Unused for MIP.
+        rng: Random key (unused).
         config: Configuration dict.
 
     Returns:
@@ -106,7 +101,6 @@ def mip_sampler(network, encoder, observations, num_steps, rng, config):
     horizon = config.get("horizon", 10)
     action_dim = config.get("action_dim", 7)
 
-    # Encode observations (no crop rng needed for inference - uses center crop)
     cond = encoder(observations, training=False, rngs={})
 
     # Step 1: Predict from zeros
@@ -122,20 +116,46 @@ def mip_sampler(network, encoder, observations, num_steps, rng, config):
     return pred_step2
 
 
-def get_sampler(sampler_type="euler"):
-    """Get sampler function by type.
+def meanflow_sampler(network, encoder, observations, num_steps, rng, config):
+    """MeanFlow single-step sampler.
+
+    Generates actions in one network evaluation:
+        actions = x0 + u_theta(x0, s=0, t=1, cond)
 
     Args:
-        sampler_type: Type of sampler ('euler', 'heun', 'mip').
+        network: Flow network.
+        encoder: Observation encoder.
+        observations: Observations.
+        num_steps: Unused (always single-step).
+        rng: Random key.
+        config: Configuration dict.
 
     Returns:
-        Sampler function.
+        Sampled actions. Shape: (batch, horizon, action_dim)
     """
+    batch_size = get_batch_size(observations)
+    horizon = config.get("horizon", 10)
+    action_dim = config.get("action_dim", 7)
+
+    cond = encoder(observations, training=False, rngs={})
+
+    x0 = jax.random.normal(rng, (batch_size, horizon, action_dim))
+    s = jnp.zeros((batch_size,))
+    t = jnp.ones((batch_size,))
+
+    actions = x0 + network(x0, s, t, cond, training=False)
+    return actions
+
+
+def get_sampler(sampler_type="euler"):
+    """Get sampler function by type."""
     if sampler_type == "euler":
         return euler_sampler
     elif sampler_type == "heun":
         return heun_sampler
     elif sampler_type == "mip":
         return mip_sampler
+    elif sampler_type == "meanflow":
+        return meanflow_sampler
     else:
         raise ValueError(f"Unknown sampler type: {sampler_type}")
