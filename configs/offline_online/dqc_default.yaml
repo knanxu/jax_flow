@@ -1,0 +1,85 @@
+# DQC default configuration
+# Usage: python scripts/train_dqc.py --config-name dqc_default task=square_lowdim
+
+defaults:
+  - /task: square_lowdim
+  - /network: mlp
+  - /flow: flow_matching
+  - /optimization: default
+  - _self_
+
+# Random seed
+seed: 42
+
+# Logging
+project_name: jax_flow
+experiment_name: dqc_${task.name}_${flow.name}_${network.name}
+log_dir: logs
+checkpoint_dir: checkpoints
+
+# ============================================================
+# DQC Algorithm Parameters
+# ============================================================
+algorithm:
+  name: dqc
+
+  # Decoupled chunk sizes
+  backup_horizon: 16       # Long chunk for chunk_critic (H)
+  policy_chunk_size: 4     # Short chunk for actor and action_critic (h)
+
+  # Critic
+  num_qs: 2                # Q-function ensemble size
+  q_agg: mean              # Q aggregation: "min" or "mean"
+  value_hidden_dims: [512, 512, 512, 512]
+  critic_layer_norm: true
+
+  # Target network
+  tau: 0.005               # Polyak averaging coefficient
+  discount: 0.99           # Discount factor
+
+  # Expectile regression (IQL-style)
+  kappa_d: 0.7             # Expectile for action_critic distillation
+  kappa_b: 0.7             # Expectile for value function backup
+
+  # Advantage-weighted actor
+  temperature: 1.0         # Temperature for advantage weighting
+  max_weight: 100.0        # Max weight clipping
+
+  # Inference
+  best_of_n: 32            # Number of candidates for best-of-N
+
+  # Reward
+  reward_transform: true   # Apply reward - 1.0 for robomimic
+
+  # Training
+  gradient_steps: 500000   # Total offline training steps
+
+  # Replay buffer
+  buffer_capacity: 1000000
+
+# Evaluation
+eval:
+  num_episodes: 50
+  eval_interval: 50000
+  render: false
+  save_video: true
+  num_videos: 3
+  max_episode_steps: 500
+
+# Checkpointing
+checkpoint:
+  save_freq: 50000
+  keep_last_n: 3
+  save_best: true
+
+# Weights & Biases
+wandb:
+  enabled: true
+  entity: null
+  project: ${project_name}
+  name: ${experiment_name}_seed${seed}
+  tags:
+    - dqc
+    - ${task.name}
+    - ${flow.name}
+  log_videos: true

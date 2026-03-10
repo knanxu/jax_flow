@@ -36,17 +36,20 @@ class Value(nn.Module):
     activation: str = "gelu"
 
     @nn.compact
-    def __call__(self, observations, actions):
-        """Compute Q-values.
+    def __call__(self, observations, actions=None):
+        """Compute Q-values Q(s,a) or state-values V(s).
 
         Args:
             observations: Observations. Shape: (batch, obs_dim)
-            actions: Actions. Shape: (batch, action_dim)
+            actions: Actions. Shape: (batch, action_dim). If None, computes V(s).
 
         Returns:
-            Q-values. Shape: (num_ensembles, batch) if ensemble, else (batch,)
+            Values. Shape: (num_ensembles, batch) if ensemble, else (batch,)
         """
-        x = jnp.concatenate([observations, actions], axis=-1)
+        if actions is not None:
+            x = jnp.concatenate([observations, actions], axis=-1)
+        else:
+            x = observations
 
         if self.num_ensembles > 1:
             EnsembleQ = nn.vmap(

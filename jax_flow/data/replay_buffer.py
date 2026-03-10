@@ -76,6 +76,10 @@ class ReplayBuffer:
         self.dones = np.zeros((self.capacity, 1), dtype=np.float32)
         self.discounts = np.zeros((self.capacity, 1), dtype=np.float32)
 
+        # Episode boundary tracking for sample_sequence
+        self.episode_ids = np.zeros((self.capacity,), dtype=np.int64)
+        self._current_episode_id = 0
+
     def add(
         self,
         obs: np.ndarray | dict,
@@ -178,6 +182,10 @@ class ReplayBuffer:
         self.rewards[self.ptr] = reward
         self.dones[self.ptr] = float(done)
         self.discounts[self.ptr] = discount
+        self.episode_ids[self.ptr] = self._current_episode_id
+
+        if done:
+            self._current_episode_id += 1
 
         # Update pointer and size
         self.ptr = (self.ptr + 1) % self.capacity
@@ -233,6 +241,110 @@ class ReplayBuffer:
     def __len__(self) -> int:
         """Return current buffer size."""
         return self.size
+
+    def sample_sequence(
+        self,
+        batch_size: int,
+        sequence_length: int,
+        discount: float,
+        policy_chunk_size: int | None = None,
+        rng: np.random.Generator = None,
+    ) -> dict:
+        """Sample consecutive action chunks for ACFQL/DQC training.
+
+        Samples sequences of `sequence_length` consecutive transitions that
+        don't cross episode boundaries. Computes cumulative discounted rewards.
+
+        Args:
+            batch_size: Number of sequences to sample.
+            sequence_length: Length of action chunk (ACFQL chunk_length / DQC backup_horizon).
+            discount: Discount factor for cumulative reward.
+            policy_chunk_size: If provided, also return short action chunks (DQC).
+            rng: NumPy random generator.
+
+        Returns:
+            Dictionary with keys:
+                observations: First-step obs. Shape depends on obs_shape.
+                actions_long: (batch, sequence_length, action_dim)
+                actions_short: (batch, policy_chunk_size, action_dim) — only if policy_chunk_size set
+                rewards: Cumulative discounted reward (batch, 1)
+                next_observations: Last-step next_obs.
+                masks: 1 - done at last step (batch, 1)
+                valid: Whether full sequence is within one episode (batch, 1)
+        """
+        if rng is None:
+            rng = np.random.default_rng()
+
+        max_start = self.size - sequence_length
+        if max_start <= 0:
+            raise ValueError(
+                f"Buffer size {self.size} too small for sequence_length {sequence_length}"
+            )
+
+        # Sample start indices with rejection sampling for episode boundaries
+        starts = np.empty(batch_size, dtype=np.int64)
+        valid = np.ones(batch_size, dtype=np.float32)
+
+        for b in range(batch_size):
+            found = False
+            for _attempt in range(10):
+                idx = rng.integers(0, max_start)
+                # Check all indices are in the same episode (no boundary crossing)
+                seq_ids = self.episode_ids[idx : idx + sequence_length]
+                if np.all(seq_ids == seq_ids[0]):
+                    starts[b] = idx
+                    found = True
+                    break
+            if not found:
+                # Fallback: use the index anyway but mark as invalid
+                starts[b] = idx
+                valid[b] = 0.0
+
+        # Build index arrays for gathering: (batch, sequence_length)
+        offsets = np.arange(sequence_length)[None, :]  # (1, seq_len)
+        all_indices = starts[:, None] + offsets  # (batch, seq_len)
+
+        # Gather actions: (batch, sequence_length, action_dim)
+        actions_long = self.actions[all_indices]
+
+        # Gather rewards and compute cumulative discounted reward
+        seq_rewards = self.rewards[all_indices].squeeze(-1)  # (batch, seq_len)
+        gammas = discount ** np.arange(sequence_length)  # (seq_len,)
+        cum_rewards = np.sum(seq_rewards * gammas[None, :], axis=1, keepdims=True)
+
+        # Gather observations (first step) and next_observations (last step)
+        last_indices = starts + sequence_length - 1
+        if isinstance(self.obs_shape, dict):
+            obs_batch = {}
+            next_obs_batch = {}
+            for key in self.obs_shape.keys():
+                obs_data = self.obs[key][starts]
+                next_data = self.next_obs[key][last_indices]
+                if "image" in key.lower():
+                    obs_data = obs_data.astype(np.float32) / 255.0
+                    next_data = next_data.astype(np.float32) / 255.0
+                obs_batch[key] = obs_data
+                next_obs_batch[key] = next_data
+        else:
+            obs_batch = self.obs[starts]
+            next_obs_batch = self.next_obs[last_indices]
+
+        # Masks: 1 - done at last step
+        masks = 1.0 - self.dones[last_indices]
+
+        result = {
+            "observations": obs_batch,
+            "actions_long": actions_long,
+            "rewards": cum_rewards,
+            "next_observations": next_obs_batch,
+            "masks": masks,
+            "valid": valid[:, None],
+        }
+
+        if policy_chunk_size is not None:
+            result["actions_short"] = actions_long[:, :policy_chunk_size, :]
+
+        return result
 
 
 class OfflineReplayBuffer(ReplayBuffer):

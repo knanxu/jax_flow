@@ -118,6 +118,7 @@ def main():
         frame_stack=obs_steps,
         act_exec_steps=act_steps,
         seed=args.seed,
+        render_offscreen=args.save_video or args.render,
     )
     print(f"✓ Environment created: {env_name} ({obs_type})")
 

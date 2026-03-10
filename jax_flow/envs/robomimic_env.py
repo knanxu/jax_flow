@@ -388,6 +388,7 @@ def make_robomimic_env(
     image_keys=None,
     lowdim_keys=None,
     seed=None,
+    render_offscreen=None,
 ):
     """Factory function to create robomimic environment.
 
@@ -479,10 +480,11 @@ def make_robomimic_env(
 
     # Create environment
     use_image = obs_type == "image"
+    need_offscreen = render_offscreen if render_offscreen is not None else use_image
     env = EnvUtils.create_env_from_metadata(
         env_meta=env_meta,
         render=False,
-        render_offscreen=use_image,
+        render_offscreen=need_offscreen,
         use_image_obs=use_image,
     )
 

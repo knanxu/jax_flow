@@ -237,7 +237,7 @@ def main(cfg: DictConfig):
             agent_config["crop_shape"] = tuple(crop_shape)
     else:
         # Store obs_keys for lowdim mode
-        agent_config["obs_keys"] = tuple(cfg.task.dataset.get("obs_keys", [
+        agent_config["obs_keys"] = tuple(cfg.task.get("obs_keys", [
             "robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"
         ]))
 

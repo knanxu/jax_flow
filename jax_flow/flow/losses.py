@@ -54,8 +54,12 @@ def flow_loss(network, encoder, interpolant, batch, rng, config, step=None):
     # Predict velocity (network now handles horizon dimension internally)
     predicted_velocity = network(x_t, t, t, cond, training=True)
 
-    # Compute loss
-    loss = jnp.mean((predicted_velocity - target_velocity) ** 2)
+    # Compute loss (with optional per-sample weighting for DQC)
+    per_sample = jnp.mean((predicted_velocity - target_velocity) ** 2, axis=(1, 2))
+    if "sample_weights" in batch:
+        loss = jnp.mean(batch["sample_weights"] * per_sample)
+    else:
+        loss = jnp.mean(per_sample)
     loss = loss * config.get("loss_scale", 0.1)
 
     info = {
@@ -113,13 +117,16 @@ def mip_loss(network, encoder, interpolant, batch, rng, config, step=None):
     pred_step2 = network(act_t, st, st, cond, training=True)
 
     # Per-sample L2 norm squared, normalized by time scale
-    # Reference: ||pred - act||_2^2 / scale^2, averaged over batch
-    loss1 = jnp.mean(
-        jnp.sum((pred_step1 - actions) ** 2, axis=(1, 2)) / (t_two_step**2)
-    )
-    loss2 = jnp.mean(
-        jnp.sum((pred_step2 - actions) ** 2, axis=(1, 2)) / ((1 - t_two_step) ** 2)
-    )
+    per_sample1 = jnp.sum((pred_step1 - actions) ** 2, axis=(1, 2)) / (t_two_step**2)
+    per_sample2 = jnp.sum((pred_step2 - actions) ** 2, axis=(1, 2)) / ((1 - t_two_step) ** 2)
+
+    if "sample_weights" in batch:
+        w = batch["sample_weights"]
+        loss1 = jnp.mean(w * per_sample1)
+        loss2 = jnp.mean(w * per_sample2)
+    else:
+        loss1 = jnp.mean(per_sample1)
+        loss2 = jnp.mean(per_sample2)
 
     loss = (loss1 + loss2) * config.get("loss_scale", 0.1)
 
@@ -229,7 +236,7 @@ def mf_loss(network, encoder, interpolant, batch, rng, config, step=None):
     v_target = interpolant.velocity(t_flow, x0, x1)
     v_pred = network(x_t_flow, t_flow, t_flow, cond, training=True)  # s=t
 
-    flow_matching_loss = jnp.mean((v_pred - v_target) ** 2)
+    fm_per_sample = jnp.mean((v_pred - v_target) ** 2, axis=(1, 2))
 
     # === Term 2: MeanFlow self-distillation with delta_t schedule ===
     delta_t = _compute_delta_t(step, config)
@@ -269,12 +276,19 @@ def mf_loss(network, encoder, interpolant, batch, rng, config, step=None):
         per_sample_error = jnp.mean(error_sq, axis=(1, 2))
         w = 1.0 / (per_sample_error + c) ** p
         w = jax.lax.stop_gradient(w)
-        mf_term = jnp.mean(w * per_sample_error)
+        mf_per_sample = w * per_sample_error
     else:
-        mf_term = jnp.mean(error_sq)
+        mf_per_sample = jnp.mean(error_sq, axis=(1, 2))
 
-    # === Combine ===
+    # === Combine with optional sample weights ===
     loss_scale = config.get("loss_scale", 0.1)
+    if "sample_weights" in batch:
+        sw = batch["sample_weights"]
+        flow_matching_loss = jnp.mean(sw * fm_per_sample)
+        mf_term = jnp.mean(sw * mf_per_sample)
+    else:
+        flow_matching_loss = jnp.mean(fm_per_sample)
+        mf_term = jnp.mean(mf_per_sample)
     total_loss = loss_scale * (flow_matching_loss + mf_term)
 
     info = {
@@ -333,7 +347,7 @@ def imf_loss(network, encoder, interpolant, batch, rng, config, step=None):
     v_target = interpolant.velocity(t_flow, x0, x1)
     v_pred = network(x_t_flow, t_flow, t_flow, cond, training=True)  # s=t
 
-    flow_matching_loss = jnp.mean((v_pred - v_target) ** 2)
+    fm_per_sample = jnp.mean((v_pred - v_target) ** 2, axis=(1, 2))
 
     # === Term 2: Improved MeanFlow v-loss with delta_t schedule ===
     delta_t = _compute_delta_t(step, config)
@@ -351,8 +365,8 @@ def imf_loss(network, encoder, interpolant, batch, rng, config, step=None):
     # JVP computation: d/ds u(x_s, s, t) with tangents (v_s, 1, 0)
     def net_fn(x, s_arg, t_arg):
         return network(x, s_arg, t_arg, cond, training=True)
-    
-    v_s = net_fn(x_s, s , t)
+
+    v_s = net_fn(x_s, s, s)
     primals = (x_s, s, t)
     tangents = (v_s, jnp.ones((batch_size,)), jnp.zeros((batch_size,)))
 
@@ -374,12 +388,19 @@ def imf_loss(network, encoder, interpolant, batch, rng, config, step=None):
         per_sample_error = jnp.mean(error_sq, axis=(1, 2))
         w = 1.0 / (per_sample_error + c) ** p
         w = jax.lax.stop_gradient(w)
-        imf_term = jnp.mean(w * per_sample_error)
+        imf_per_sample = w * per_sample_error
     else:
-        imf_term = jnp.mean(error_sq)
+        imf_per_sample = jnp.mean(error_sq, axis=(1, 2))
 
-    # === Combine ===
+    # === Combine with optional sample weights ===
     loss_scale = config.get("loss_scale", 0.1)
+    if "sample_weights" in batch:
+        sw = batch["sample_weights"]
+        flow_matching_loss = jnp.mean(sw * fm_per_sample)
+        imf_term = jnp.mean(sw * imf_per_sample)
+    else:
+        flow_matching_loss = jnp.mean(fm_per_sample)
+        imf_term = jnp.mean(imf_per_sample)
     total_loss = loss_scale * (flow_matching_loss + imf_term)
 
     info = {
