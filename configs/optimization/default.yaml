@@ -2,6 +2,7 @@
 
 # Learning rate
 lr: 1e-4
+backbone_lr: 1e-5  # Differential LR for image encoder backbone (used with multi_image)
 weight_decay: 1e-5
 
 # Optimizer

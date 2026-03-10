@@ -3,6 +3,7 @@
 import functools
 from collections.abc import Callable
 
+import jax
 import jax.numpy as jnp
 import optax
 from flax import linen as nn
@@ -117,10 +118,29 @@ def get_batch_size(obs):
     return obs.shape[0]
 
 
+def make_param_labels(params):
+    """Generate parameter label tree for optax.multi_transform.
+
+    Labels 'modules_encoder' subtree as 'encoder', everything else as 'flow'.
+    ModuleDict names submodules as 'modules_{key}' under Flax auto-naming.
+    """
+    return jax.tree_util.tree_map_with_path(
+        lambda path, _: (
+            "encoder"
+            if any(
+                str(getattr(k, "key", "")).startswith("modules_encoder") for k in path
+            )
+            else "flow"
+        ),
+        params,
+    )
+
+
 __all__ = [
     "get_activation",
     "create_learning_rate_schedule",
     "create_optimizer",
+    "make_param_labels",
     "at_least_ndim",
     "get_batch_size",
 ]

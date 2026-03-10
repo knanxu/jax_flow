@@ -18,7 +18,7 @@ Build a high-quality, reusable JAX codebase for robotics research with:
 3. **Multiple networks**: MLP (priority), UNet, Transformer (DiT)
 4. **Full environment support**: Robomimic MimicGen DexMimicGen (lowdim + image)
 5. **Clean config management**: Hydra + OmegaConf (YAML configs)
-6. **Offline-to-online RL**: ACFQL algorithm from qc project
+6. **Offline-to-online RL**: ACFQL and DQC algorithms from qc/dqc projects
 7. **Extensibility**: Standard agent design (jaxrl_m, qc patterns)
 
 ### Commands
@@ -61,6 +61,14 @@ python scripts/train_bc.py task=lift_lowdim wandb.enabled=false
 
 # Adjust evaluation frequency
 python scripts/train_bc.py task=lift_lowdim eval.eval_interval=20000
+
+# ACFQL: offline-to-online RL with action chunking
+python scripts/train_acfql.py --config-name acfql_default task=square_lowdim
+python scripts/train_acfql.py --config-name acfql_default task=square_lowdim algorithm.actor_type=distill-ddpg
+
+# DQC: decoupled Q-chunking (offline)
+python scripts/train_dqc.py --config-name dqc_default task=square_lowdim
+python scripts/train_dqc.py --config-name dqc_default task=square_lowdim algorithm.backup_horizon=25 algorithm.policy_chunk_size=5
 ```
 
 ### Evaluation
@@ -136,9 +144,10 @@ pyright jax_flow/
    - Custom `flax.struct.PyTreeNode` with `apply_loss_fn` (qc pattern)
    - ModuleDict: 单个 TrainState 管理多个网络（encoder, flow, critic 等）
    - `select(name)` helper for module access
+   - `extra_variables`: 存储 batch_stats 等非 params 变量（FrozenBatchNorm 用），lowdim 任务为 None
 
 2. **Agents** (`jax_flow/agents/`)
-   - `BCAgent`: Flow matching BC, immutable PyTreeNode
+   - `BCAgent`: Flow matching BC, immutable PyTreeNode。图像任务自动加载 ImageNet 预训练 ResNet18 + 差异学习率（backbone_lr vs lr）
    - `ResFiTAgent`: Residual RL fine-tuning (TD3 + RED-Q + 残差动作), 3 独立 TrainState
    - `ACFQLAgent`: Offline-to-online RL (待完善)
    - Pattern: `create()` → `update(batch)` → `sample_actions(obs)`

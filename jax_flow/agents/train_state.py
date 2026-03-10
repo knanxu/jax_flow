@@ -88,6 +88,7 @@ class TrainState(flax.struct.PyTreeNode):
     params: Any
     tx: optax.GradientTransformation = nonpytree_field()
     opt_state: optax.OptState
+    extra_variables: Any = None  # e.g. {"batch_stats": ...} for FrozenBatchNorm
 
     @classmethod
     def create(cls, model_def, params, tx=None, **kwargs):
@@ -133,6 +134,8 @@ class TrainState(flax.struct.PyTreeNode):
         if params is None:
             params = self.params
         variables = {"params": params}
+        if self.extra_variables is not None:
+            variables.update(self.extra_variables)
 
         method_fn = getattr(self.model_def, method) if method is not None else None
 
@@ -140,7 +143,9 @@ class TrainState(flax.struct.PyTreeNode):
         if rngs is not None:
             extra_kwargs["rngs"] = rngs
 
-        return self.apply_fn(variables, *args, method=method_fn, **extra_kwargs, **kwargs)
+        return self.apply_fn(
+            variables, *args, method=method_fn, **extra_kwargs, **kwargs
+        )
 
     def select(self, name):
         """Helper to select a module from ModuleDict.

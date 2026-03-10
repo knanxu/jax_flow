@@ -1,16 +1,20 @@
 """Behavior Cloning agent with flow matching."""
 
+import logging
 from typing import Any
 
 import flax
 import jax
 import jax.numpy as jnp
+import optax
 
 from jax_flow.agents.train_state import ModuleDict, TrainState, nonpytree_field
-from jax_flow.core.utils import get_batch_size
+from jax_flow.core.utils import create_optimizer, get_batch_size, make_param_labels
 from jax_flow.flow.interpolant import Interpolant
 from jax_flow.flow.losses import get_loss_fn
 from jax_flow.flow.samplers import get_sampler
+
+logger = logging.getLogger(__name__)
 
 
 class BCAgent(flax.struct.PyTreeNode):
@@ -41,11 +45,10 @@ class BCAgent(flax.struct.PyTreeNode):
         Returns:
             New BCAgent instance.
         """
-        from jax_flow.core.utils import create_optimizer
         from jax_flow.networks.encoders import create_encoder
         from jax_flow.networks.mlp import MLP
-        from jax_flow.networks.unet import ConditionalUnet1D
         from jax_flow.networks.transformer import TransformerForFlow
+        from jax_flow.networks.unet import ConditionalUnet1D
 
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng)
@@ -156,20 +159,67 @@ class BCAgent(flax.struct.PyTreeNode):
 
         network_def = ModuleDict(networks)
         rng, crop_md_rng = jax.random.split(rng)
-        network_params = network_def.init(
+        all_variables = network_def.init(
             {"params": init_rng, "crop": crop_md_rng}, **network_args
-        )["params"]
-
-        # Create optimizer
-        tx = create_optimizer(
-            lr=config.get("lr", 3e-4),
-            weight_decay=config.get("weight_decay", 0.0),
-            schedule_type=config.get("schedule_type", "constant"),
-            warmup_steps=config.get("warmup_steps", 0),
-            total_steps=config.get("gradient_steps", 100000),
+        )
+        network_params = flax.core.unfreeze(all_variables["params"])
+        batch_stats = (
+            flax.core.unfreeze(all_variables["batch_stats"])
+            if "batch_stats" in all_variables
+            else None
         )
 
-        network = TrainState.create(network_def, network_params, tx=tx)
+        # Load ImageNet pretrained weights for image tasks
+        is_image_task = config.get("encoder_type") == "multi_image"
+        if is_image_task and batch_stats is not None:
+            from jax_flow.networks.encoders.pretrained_weights import (
+                load_pretrained_resnet18,
+            )
+
+            enc_key = "modules_encoder"
+            encoder_params, encoder_bs = load_pretrained_resnet18(
+                network_params[enc_key], batch_stats[enc_key]
+            )
+            network_params[enc_key] = encoder_params
+            batch_stats[enc_key] = encoder_bs
+            logger.info("Loaded ImageNet pretrained ResNet18 weights")
+
+        network_params = flax.core.freeze(network_params)
+
+        # Create optimizer (differential LR for image tasks)
+        if is_image_task:
+            backbone_lr = config.get("backbone_lr", 1e-5)
+            encoder_tx = create_optimizer(
+                lr=backbone_lr,
+                weight_decay=config.get("weight_decay", 0.0),
+                schedule_type=config.get("schedule_type", "constant"),
+                warmup_steps=config.get("warmup_steps", 0),
+                total_steps=config.get("gradient_steps", 100000),
+            )
+            flow_tx = create_optimizer(
+                lr=config.get("lr", 3e-4),
+                weight_decay=config.get("weight_decay", 0.0),
+                schedule_type=config.get("schedule_type", "constant"),
+                warmup_steps=config.get("warmup_steps", 0),
+                total_steps=config.get("gradient_steps", 100000),
+            )
+            label_fn = make_param_labels(network_params)
+            tx = optax.multi_transform(
+                {"encoder": encoder_tx, "flow": flow_tx}, label_fn
+            )
+        else:
+            tx = create_optimizer(
+                lr=config.get("lr", 3e-4),
+                weight_decay=config.get("weight_decay", 0.0),
+                schedule_type=config.get("schedule_type", "constant"),
+                warmup_steps=config.get("warmup_steps", 0),
+                total_steps=config.get("gradient_steps", 100000),
+            )
+
+        extra_vars = {"batch_stats": batch_stats} if batch_stats is not None else None
+        network = TrainState.create(
+            network_def, network_params, tx=tx, extra_variables=extra_vars
+        )
 
         # Create interpolant and loss function
         interpolant = Interpolant(config.get("interp_type", "linear"))
