@@ -93,11 +93,12 @@ def create_encoder(
     layer_norm=False,
     dropout=0.0,
     # Image encoder kwargs
-    image_keys=('agentview_image',),
-    lowdim_keys=('robot0_eef_pos', 'robot0_gripper_qpos'),
+    image_keys=("agentview_image",),
+    lowdim_keys=("robot0_eef_pos", "robot0_gripper_qpos"),
     share_image_encoder=False,
     use_spatial_softmax=True,
     crop_shape=None,
+    **kwargs,
 ):
     """Factory function to create encoder.
 
@@ -128,13 +129,27 @@ def create_encoder(
         )
     elif encoder_type == "resnet":
         from jax_flow.networks.encoders.resnet import ResNet18Encoder
+
         return ResNet18Encoder(
             output_dim=output_dim,
             use_spatial_softmax=use_spatial_softmax,
             pool_type="spatial_softmax" if use_spatial_softmax else "avg_pool",
         )
+    elif encoder_type == "vit":
+        from jax_flow.networks.encoders.vit import MinViTEncoder
+
+        return MinViTEncoder(
+            embed_dim=kwargs.get("vit_embed_dim", 128),
+            num_heads=kwargs.get("vit_num_heads", 4),
+            depth=kwargs.get("vit_depth", 1),
+            ffn_mult=kwargs.get("vit_ffn_mult", 4),
+            dropout=dropout,
+            output_dim=output_dim,
+            return_patches=kwargs.get("return_patches", False),
+        )
     elif encoder_type == "multi_image":
         from jax_flow.networks.encoders.multi_image import MultiImageEncoder
+
         return MultiImageEncoder(
             image_keys=image_keys,
             lowdim_keys=lowdim_keys,
@@ -142,6 +157,12 @@ def create_encoder(
             share_image_encoder=share_image_encoder,
             use_spatial_softmax=use_spatial_softmax,
             crop_shape=crop_shape,
+            image_backbone=kwargs.get("image_backbone", "resnet"),
+            vit_embed_dim=kwargs.get("vit_embed_dim", 128),
+            vit_num_heads=kwargs.get("vit_num_heads", 4),
+            vit_depth=kwargs.get("vit_depth", 1),
+            vit_ffn_mult=kwargs.get("vit_ffn_mult", 4),
+            return_patches=kwargs.get("return_patches", False),
         )
     else:
         raise ValueError(f"Unknown encoder type: {encoder_type}")

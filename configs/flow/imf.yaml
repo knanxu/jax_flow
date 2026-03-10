@@ -1,0 +1,36 @@
+# Improved MeanFlow configuration
+
+name: improved_meanflow
+policy_type: imf
+
+# Interpolant configuration
+interp_type: linear  # linear or trigonometric
+
+# Sampler configuration (same as MeanFlow - single-step)
+sampler:
+  type: meanflow
+  num_steps: 1
+  deterministic: true
+  adaptive_step: false
+  sample_mode: zero
+
+# Delta-t progressive schedule
+delta_t_schedule:
+  warmup_ratio: 0.1
+  rampup_ratio: 0.5
+  max_delta_t: 1.0
+
+# Adaptive weighting for loss
+adaptive_weight:
+  enabled: true
+  c: 0.01
+  p: 1.0
+
+# Loss computation
+loss:
+  norm_type: l2
+  scale: 0.1
+
+# Training specific
+use_ema: true
+ema_decay: 0.995

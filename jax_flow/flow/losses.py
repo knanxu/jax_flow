@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from jax_flow.core.utils import get_batch_size
 
 
-def flow_loss(network, encoder, interpolant, batch, rng, config):
+def flow_loss(network, encoder, interpolant, batch, rng, config, step=None):
     """Standard flow matching loss.
 
     Learns to match the velocity field v_t(x_t) = dx_t/dt.
@@ -66,13 +66,17 @@ def flow_loss(network, encoder, interpolant, batch, rng, config):
     return loss, info
 
 
-def mip_loss(network, encoder, interpolant, batch, rng, config):
+def mip_loss(network, encoder, interpolant, batch, rng, config, step=None):
     """Minimum Iterative Policy (MIP) loss.
 
-    Two-step denoising with deterministic initialization.
+    Two-step prediction with deterministic zero initialization.
+    Follows much-ado-about-noising reference implementation:
+      Step 1: network(zeros, s=0, s=0, cond) -> velocity, target = actions
+      Step 2: network(act_t, s=t_two_step, s=t_two_step, cond) -> velocity, target = actions
+    where act_t = actions + (1 - t_two_step) * noise.
 
     Args:
-        network: Flow network.
+        network: Flow network with signature (at, s, t, cond, training).
         encoder: Observation encoder.
         interpolant: Interpolant (not used in MIP).
         batch: Batch of data.
@@ -95,22 +99,27 @@ def mip_loss(network, encoder, interpolant, batch, rng, config):
     rng, crop_rng = jax.random.split(rng)
     cond = encoder(observations, training=True, rngs={"crop": crop_rng})
 
-    # Step 1: s=0, predict from zeros
+    # Step 1: predict velocity from zeros at s=0
     s0 = jnp.zeros((batch_size,))
     x0 = jnp.zeros((batch_size, horizon, action_dim))
     pred_step1 = network(x0, s0, s0, cond, training=True)
 
-    # Step 2: s=t_two_step, predict from noisy target
+    # Step 2: predict velocity from noisy target at s=t_two_step
     rng, noise_rng = jax.random.split(rng)
     noise = jax.random.normal(noise_rng, (batch_size, horizon, action_dim))
-    x_t = actions + (1 - t_two_step) * noise
+    act_t = actions + (1 - t_two_step) * noise
 
     st = jnp.full((batch_size,), t_two_step)
-    pred_step2 = network(x_t, st, st, cond, training=True)
+    pred_step2 = network(act_t, st, st, cond, training=True)
 
-    # Compute losses
-    loss1 = jnp.mean((pred_step1 - actions) ** 2) / (t_two_step**2)
-    loss2 = jnp.mean((pred_step2 - actions) ** 2) / ((1 - t_two_step) ** 2)
+    # Per-sample L2 norm squared, normalized by time scale
+    # Reference: ||pred - act||_2^2 / scale^2, averaged over batch
+    loss1 = jnp.mean(
+        jnp.sum((pred_step1 - actions) ** 2, axis=(1, 2)) / (t_two_step**2)
+    )
+    loss2 = jnp.mean(
+        jnp.sum((pred_step2 - actions) ** 2, axis=(1, 2)) / ((1 - t_two_step) ** 2)
+    )
 
     loss = (loss1 + loss2) * config.get("loss_scale", 0.1)
 
@@ -151,13 +160,39 @@ def _sample_logit_normal_times(rng, batch_size, mu=-0.4, sigma=1.0, ratio_equal=
     return s, t
 
 
-def mf_loss(network, encoder, interpolant, batch, rng, config):
-    """Mean Flow loss with JVP-based Jacobian computation.
+def _compute_delta_t(step, config):
+    """Compute delta_t based on progressive schedule.
 
-    Core equation (t=0 noise, t=1 data, network input x_s):
-        u, duds = jvp(u_theta(x, s, t, cond), primals=(x_s, s, t), tangents=(v_s, 1, 0))
-        u_target = v_s + (t - s) * duds
-        loss = mean((u - stop_gradient(u_target))^2)
+    Schedule: delta_t = clip((progress - warmup) / rampup, 0, 1) * max_delta_t
+    where progress = step / gradient_steps.
+
+    Args:
+        step: Current training step (or None for evaluation).
+        config: Config dict with 'delta_t_schedule' and 'gradient_steps'.
+
+    Returns:
+        Scalar delta_t value.
+    """
+    schedule = config.get("delta_t_schedule", {})
+    warmup_ratio = schedule.get("warmup_ratio", 0.0)
+    rampup_ratio = schedule.get("rampup_ratio", 0.5)
+    max_delta_t = schedule.get("max_delta_t", 1.0)
+    gradient_steps = config.get("gradient_steps", 300000)
+
+    if step is None:
+        return max_delta_t
+
+    progress = jnp.asarray(step, dtype=jnp.float32) / gradient_steps
+    delta_t = jnp.clip((progress - warmup_ratio) / jnp.maximum(rampup_ratio, 1e-8), 0.0, 1.0)
+    return delta_t * max_delta_t
+
+
+def mf_loss(network, encoder, interpolant, batch, rng, config, step=None):
+    """Mean Flow loss: flow matching term + JVP self-distillation term.
+
+    Combines:
+    1. Independent flow matching loss (learns accurate instantaneous velocity)
+    2. MeanFlow self-distillation with delta_t progressive schedule
 
     Args:
         network: Flow network with signature (at, s, t, cond, training).
@@ -165,7 +200,8 @@ def mf_loss(network, encoder, interpolant, batch, rng, config):
         interpolant: Interpolant for x0 -> x1.
         batch: Batch of data with 'observations' and 'actions'.
         rng: Random key.
-        config: Configuration dict with time_sampling and adaptive_weight params.
+        config: Configuration dict.
+        step: Current training step (None for evaluation).
 
     Returns:
         Tuple of (loss, info_dict).
@@ -177,77 +213,190 @@ def mf_loss(network, encoder, interpolant, batch, rng, config):
     horizon = actions.shape[1]
     action_dim = actions.shape[2]
 
-    # Encode observations
+    # === Shared: encode observations, sample noise ===
     rng, crop_rng = jax.random.split(rng)
     cond = encoder(observations, training=True, rngs={"crop": crop_rng})
 
-    # Sample noise
     rng, noise_rng = jax.random.split(rng)
     x0 = jax.random.normal(noise_rng, (batch_size, horizon, action_dim))
     x1 = actions
 
-    # Sample (s, t) pairs via logit-normal distribution
-    time_cfg = config.get("time_sampling", {})
-    mu = time_cfg.get("mu", -0.4)
-    sigma = time_cfg.get("sigma", 1.0)
-    ratio_equal = time_cfg.get("ratio_equal", 0.25)
+    # === Term 1: Independent flow matching loss ===
+    rng, t_flow_rng = jax.random.split(rng)
+    t_flow = jax.random.uniform(t_flow_rng, (batch_size,), minval=0.0, maxval=1.0)
 
+    x_t_flow = interpolant.interpolate(t_flow, x0, x1)
+    v_target = interpolant.velocity(t_flow, x0, x1)
+    v_pred = network(x_t_flow, t_flow, t_flow, cond, training=True)  # s=t
+
+    flow_matching_loss = jnp.mean((v_pred - v_target) ** 2)
+
+    # === Term 2: MeanFlow self-distillation with delta_t schedule ===
+    delta_t = _compute_delta_t(step, config)
+
+    # Time sampling: uniform + delta_t clamp
     rng, time_rng = jax.random.split(rng)
-    s, t = _sample_logit_normal_times(time_rng, batch_size, mu, sigma, ratio_equal)
+    temp1, temp2 = jax.random.uniform(time_rng, (2, batch_size), minval=0.0, maxval=1.0)
+    s = jnp.minimum(temp1, temp2)
+    t = jnp.maximum(temp1, temp2)
+    s = jnp.maximum(s, t - delta_t)
 
     # Construct x_s and v_s from interpolant
-    x_s = interpolant.interpolate(s, x0, x1)   # (batch, horizon, action_dim)
-    v_s = interpolant.velocity(s, x0, x1)       # (batch, horizon, action_dim)
+    x_s = interpolant.interpolate(s, x0, x1)
+    v_s = interpolant.velocity(s, x0, x1)
 
-    # ========== JVP computation ==========
-    # Wrap network into a pure function of (x, s_arg, t_arg) with cond captured
+    # JVP computation
     def net_fn(x, s_arg, t_arg):
         return network(x, s_arg, t_arg, cond, training=True)
 
-    # Primals: (x_s, s, t)
-    # Tangents: (v_s, ones, zeros) — differentiate w.r.t. s only
     primals = (x_s, s, t)
     tangents = (v_s, jnp.ones((batch_size,)), jnp.zeros((batch_size,)))
 
     u, duds = jax.jvp(net_fn, primals, tangents)
 
-    # ========== Target computation ==========
-    # u_target = v_s + (t - s) * duds
-    # Broadcast (t - s) from (batch,) to (batch, horizon, action_dim)
+    # Target: u_target = v_s + (t - s) * duds
     ts_diff = (t - s)[:, None, None]
     u_target = v_s + ts_diff * duds
 
-    # ========== Loss ==========
+    # Self-distillation loss
     error_sq = (u - jax.lax.stop_gradient(u_target)) ** 2
 
-    # Adaptive weighting: w = 1 / (error^2 + c)^p
+    # Adaptive weighting (only on mf_term)
     aw_cfg = config.get("adaptive_weight", {})
     if aw_cfg.get("enabled", False):
         c = aw_cfg.get("c", 0.01)
         p = aw_cfg.get("p", 1.0)
-        per_sample_error = jnp.mean(error_sq, axis=(1, 2))  # (batch,)
+        per_sample_error = jnp.mean(error_sq, axis=(1, 2))
         w = 1.0 / (per_sample_error + c) ** p
         w = jax.lax.stop_gradient(w)
-        loss = jnp.mean(w * per_sample_error)
+        mf_term = jnp.mean(w * per_sample_error)
     else:
-        loss = jnp.mean(error_sq)
+        mf_term = jnp.mean(error_sq)
 
-    loss = loss * config.get("loss_scale", 0.1)
+    # === Combine ===
+    loss_scale = config.get("loss_scale", 0.1)
+    total_loss = loss_scale * (flow_matching_loss + mf_term)
 
     info = {
-        "loss": loss,
-        "mf_loss": loss,
-        "mean_error": jnp.mean(error_sq),
+        "loss": total_loss,
+        "flow_matching_loss": flow_matching_loss,
+        "mf_term": mf_term,
+        "delta_t": delta_t,
     }
 
-    return loss, info
+    return total_loss, info
+
+
+def imf_loss(network, encoder, interpolant, batch, rng, config, step=None):
+    """Improved MeanFlow loss: flow matching term + v-loss via compound function.
+
+    Key difference from mf_loss: instead of u-loss with network-dependent target,
+    constructs compound function V = u - (t-s)*sg(duds) and regresses to the
+    fixed conditional velocity v_s. This yields a standard regression problem.
+
+    Derivation (对 s 求导版本):
+        v_s = u(z_s, s, t) - (t - s) * d/ds u(z_s, s, t)
+        => V := u - (t-s) * stopgrad(duds)  should match v_s
+
+    Args:
+        network: Flow network with signature (at, s, t, cond, training).
+        encoder: Observation encoder.
+        interpolant: Interpolant for x0 -> x1.
+        batch: Batch of data with 'observations' and 'actions'.
+        rng: Random key.
+        config: Configuration dict.
+        step: Current training step (None for evaluation).
+
+    Returns:
+        Tuple of (loss, info_dict).
+    """
+    observations = batch["observations"]
+    actions = batch["actions"]  # (batch, horizon, action_dim)
+
+    batch_size = get_batch_size(observations)
+    horizon = actions.shape[1]
+    action_dim = actions.shape[2]
+
+    # === Shared: encode observations, sample noise ===
+    rng, crop_rng = jax.random.split(rng)
+    cond = encoder(observations, training=True, rngs={"crop": crop_rng})
+
+    rng, noise_rng = jax.random.split(rng)
+    x0 = jax.random.normal(noise_rng, (batch_size, horizon, action_dim))
+    x1 = actions
+
+    # === Term 1: Independent flow matching loss ===
+    rng, t_flow_rng = jax.random.split(rng)
+    t_flow = jax.random.uniform(t_flow_rng, (batch_size,), minval=0.0, maxval=1.0)
+
+    x_t_flow = interpolant.interpolate(t_flow, x0, x1)
+    v_target = interpolant.velocity(t_flow, x0, x1)
+    v_pred = network(x_t_flow, t_flow, t_flow, cond, training=True)  # s=t
+
+    flow_matching_loss = jnp.mean((v_pred - v_target) ** 2)
+
+    # === Term 2: Improved MeanFlow v-loss with delta_t schedule ===
+    delta_t = _compute_delta_t(step, config)
+
+    # Time sampling: uniform + delta_t clamp
+    rng, time_rng = jax.random.split(rng)
+    temp1, temp2 = jax.random.uniform(time_rng, (2, batch_size), minval=0.0, maxval=1.0)
+    s = jnp.minimum(temp1, temp2)
+    t = jnp.maximum(temp1, temp2)
+    s = jnp.maximum(s, t - delta_t)
+
+    # Construct x_s and v_s from interpolant
+    x_s = interpolant.interpolate(s, x0, x1)
+    v_s_true = interpolant.velocity(s, x0, x1)
+    # JVP computation: d/ds u(x_s, s, t) with tangents (v_s, 1, 0)
+    def net_fn(x, s_arg, t_arg):
+        return network(x, s_arg, t_arg, cond, training=True)
+    
+    v_s = net_fn(x_s, s , t)
+    primals = (x_s, s, t)
+    tangents = (v_s, jnp.ones((batch_size,)), jnp.zeros((batch_size,)))
+
+    u, duds = jax.jvp(net_fn, primals, tangents)
+
+    # Compound function V: recover instantaneous velocity from mean velocity
+    # v_s = u - (t - s) * duds  =>  V = u - (t-s) * sg(duds)
+    ts_diff = (t - s)[:, None, None]
+    V = u - ts_diff * jax.lax.stop_gradient(duds)
+
+    # v-loss: regress V to fixed conditional velocity v_s
+    error_sq = (V - v_s_true) ** 2
+
+    # Adaptive weighting (only on imf_term)
+    aw_cfg = config.get("adaptive_weight", {})
+    if aw_cfg.get("enabled", False):
+        c = aw_cfg.get("c", 0.01)
+        p = aw_cfg.get("p", 1.0)
+        per_sample_error = jnp.mean(error_sq, axis=(1, 2))
+        w = 1.0 / (per_sample_error + c) ** p
+        w = jax.lax.stop_gradient(w)
+        imf_term = jnp.mean(w * per_sample_error)
+    else:
+        imf_term = jnp.mean(error_sq)
+
+    # === Combine ===
+    loss_scale = config.get("loss_scale", 0.1)
+    total_loss = loss_scale * (flow_matching_loss + imf_term)
+
+    info = {
+        "loss": total_loss,
+        "flow_matching_loss": flow_matching_loss,
+        "imf_term": imf_term,
+        "delta_t": delta_t,
+    }
+
+    return total_loss, info
 
 
 def get_loss_fn(loss_type="flow"):
     """Get loss function by type.
 
     Args:
-        loss_type: Type of loss ('flow', 'mip', 'mf').
+        loss_type: Type of loss ('flow', 'mip', 'mf', 'imf').
 
     Returns:
         Loss function.
@@ -258,5 +407,7 @@ def get_loss_fn(loss_type="flow"):
         return mip_loss
     elif loss_type == "mf" or loss_type == "meanflow":
         return mf_loss
+    elif loss_type == "imf" or loss_type == "improved_meanflow":
+        return imf_loss
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")

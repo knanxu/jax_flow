@@ -1,0 +1,22 @@
+# Square lowdim ResFiT fine-tuning configuration
+
+defaults:
+  - /resfit/default
+
+task:
+  env_name: Square
+  obs_type: lowdim
+  obs_keys:
+    - robot0_eef_pos
+    - robot0_eef_quat
+    - robot0_gripper_qpos
+    - object
+  horizon: 16
+  obs_steps: 2
+  act_steps: 8
+  max_episode_steps: 400
+
+network:
+  encoder_type: mlp
+  encoder_hidden_dims: [256, 256]
+  encoder_output_dim: 256

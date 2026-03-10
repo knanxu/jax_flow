@@ -1,0 +1,36 @@
+# DexMimicGen TwoArmThreePieceAssembly task with low-dimensional state observations
+
+name: dex_three_piece_assembly_lowdim
+env_name: TwoArmThreePieceAssembly
+dataset_name: two_arm_three_piece_assembly
+obs_type: lowdim
+
+# Dataset configuration
+dataset:
+  path: data/dexmimicgen/two_arm_three_piece_assembly/ph/low_dim_v141.hdf5
+  dataset_type: ph
+  horizon: 16
+  obs_steps: 2
+  act_steps: 8
+
+  # Normalization
+  normalize_obs: true
+  normalize_act: true
+  norm_type: min_max
+
+# Environment configuration
+env:
+  max_episode_steps: 300
+
+# Observation and action dimensions
+obs_dim: 18            # robot0_eef_pos(3) + robot0_eef_quat(4) + robot0_gripper_qpos(2) + robot1_eef_pos(3) + robot1_eef_quat(4) + robot1_gripper_qpos(2)
+act_dim: 14
+
+# Observation keys (dual-arm, no object state)
+obs_keys:
+  - robot0_eef_pos
+  - robot0_eef_quat
+  - robot0_gripper_qpos
+  - robot1_eef_pos
+  - robot1_eef_quat
+  - robot1_gripper_qpos

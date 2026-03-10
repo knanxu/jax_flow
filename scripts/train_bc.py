@@ -126,6 +126,10 @@ def main(cfg: DictConfig):
         ]))
         dataset_kwargs["image_keys"] = tuple(image_keys)
         dataset_kwargs["lowdim_keys"] = tuple(lowdim_keys)
+    else:
+        # Pass obs_keys from task config for lowdim mode
+        if "obs_keys" in cfg.task:
+            dataset_kwargs["obs_keys"] = tuple(cfg.task.obs_keys)
 
     train_dataset = make_robomimic_dataset(
         dataset_path=dataset_path,
@@ -211,6 +215,12 @@ def main(cfg: DictConfig):
         "flow_steps": cfg.flow.sampler.num_steps,
         "sample_mode": cfg.flow.sampler.get("sample_mode", "stochastic"),
         "loss_scale": cfg.flow.loss.get("scale", 0.1),
+        # MIP t_two_step
+        "t_two_step": cfg.flow.get("t_two_step", 0.9),
+        # Delta-t schedule for MeanFlow
+        "delta_t_schedule": dict(cfg.flow.get("delta_t_schedule", {})),
+        # Adaptive weighting for MeanFlow
+        "adaptive_weight": dict(cfg.flow.get("adaptive_weight", {})),
         # Store task info for evaluation
         "dataset_path": str(resolved_path),
         "env_name": cfg.task.env_name,
@@ -308,6 +318,7 @@ def main(cfg: DictConfig):
                     "train/grad_norm": float(info["grad/norm"]),
                     "train/step": step,
                     "train/lr": float(info.get("lr", cfg.optimization.lr)),
+                    **{f"train/{k}": float(info[k]) for k in ("flow_matching_loss", "mf_term", "delta_t") if k in info},
                 }, step=step)
 
         # Validation
@@ -352,6 +363,7 @@ def main(cfg: DictConfig):
                         batch=val_batch,
                         rng=agent.rng,
                         config=agent.config,
+                        step=agent.network.step,
                     )
 
                 loss, _ = val_loss_fn(agent.network.params)

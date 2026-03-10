@@ -4,6 +4,36 @@ import gymnasium as gym
 import numpy as np
 from gymnasium.spaces import Box, Dict
 
+# DexMimicGen environment registry: env_name -> default config
+_DUAL_ARM_OBS_KEYS = (
+    "robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos",
+    "robot1_eef_pos", "robot1_eef_quat", "robot1_gripper_qpos",
+)
+
+DEXMIMICGEN_ENVS = {
+    "TwoArmThreading": {
+        "obs_keys": _DUAL_ARM_OBS_KEYS,
+        "lowdim_keys": _DUAL_ARM_OBS_KEYS,
+        "image_keys": ("agentview_image", "robot0_eye_in_hand_image", "robot1_eye_in_hand_image"),
+        "max_episode_steps": 400,
+    },
+    "TwoArmThreePieceAssembly": {
+        "obs_keys": _DUAL_ARM_OBS_KEYS,
+        "lowdim_keys": _DUAL_ARM_OBS_KEYS,
+        "image_keys": ("agentview_image", "robot0_eye_in_hand_image", "robot1_eye_in_hand_image"),
+        "max_episode_steps": 300,
+    },
+    "TwoArmTransport": {
+        "obs_keys": _DUAL_ARM_OBS_KEYS,
+        "lowdim_keys": _DUAL_ARM_OBS_KEYS,
+        "image_keys": (
+            "agentview_image", "robot0_eye_in_hand_image", "robot1_eye_in_hand_image",
+            "shouldercamera0_image", "shouldercamera1_image",
+        ),
+        "max_episode_steps": 1200,
+    },
+}
+
 
 class RobomimicWrapper(gym.Env):
     """Robomimic environment wrapper with normalization.
@@ -51,7 +81,17 @@ class RobomimicWrapper(gym.Env):
 
     def _get_observation(self):
         """Get concatenated lowdim observation from environment."""
-        raw_obs = self.env.get_observation()
+        try:
+            raw_obs = self.env.get_observation()
+        except KeyError:
+            # DexMimicGen envs lack 'object-state'; get raw obs directly from robosuite
+            di = self.env.env._get_observations(force_update=True)
+            raw_obs = {}
+            for robot in self.env.env.robots:
+                pf = robot.robot_model.naming_prefix
+                for k in di:
+                    if k.startswith(pf) and not k.endswith("proprio-state"):
+                        raw_obs[k] = np.array(di[k])
         obs = np.concatenate([raw_obs[key] for key in self.obs_keys], axis=0)
 
         if self.obs_normalizer is not None:
@@ -373,6 +413,25 @@ def make_robomimic_env(
     import robomimic.utils.file_utils as FileUtils
     import robomimic.utils.obs_utils as ObsUtils
 
+    # Auto-fill defaults from DexMimicGen registry if env_name matches
+    if env_name in DEXMIMICGEN_ENVS:
+        defaults = DEXMIMICGEN_ENVS[env_name]
+        # Use registry defaults for unspecified keys
+        if obs_keys == ("robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"):
+            obs_keys = defaults["obs_keys"]
+        if image_keys is None:
+            image_keys = defaults["image_keys"]
+        if lowdim_keys is None:
+            lowdim_keys = defaults["lowdim_keys"]
+        if max_episode_steps == 400:
+            max_episode_steps = defaults["max_episode_steps"]
+
+        # Register DexMimicGen environments
+        try:
+            import dexmimicgen  # noqa: F401
+        except ImportError:
+            print("Warning: dexmimicgen not installed. Install with: pip install -e /path/to/dexmimicgen")
+
     # Initialize observation modality mapping
     if obs_type == "image":
         obs_modality_mapping = {
@@ -396,6 +455,7 @@ def make_robomimic_env(
 
     # Fix old controller config format for robosuite >= 1.5
     # MimicGen datasets use flat OSC_POSE config; robosuite 1.5+ needs BASIC composite wrapper
+    # Skip if controller_configs is a list (DexMimicGen dual-arm composite configs)
     env_kwargs = env_meta.get("env_kwargs", {})
     ctrl_cfg = env_kwargs.get("controller_configs", {})
     if isinstance(ctrl_cfg, dict) and ctrl_cfg.get("type") == "OSC_POSE":
@@ -411,6 +471,12 @@ def make_robomimic_env(
         env_kwargs.pop("render_gpu_device_id", None)
         env_meta["env_kwargs"] = env_kwargs
 
+    # Remove unsupported kwargs for DexMimicGen environments
+    if env_name in DEXMIMICGEN_ENVS:
+        for unsupported_key in ("env_lang", "render_gpu_device_id"):
+            env_kwargs.pop(unsupported_key, None)
+        env_meta["env_kwargs"] = env_kwargs
+
     # Create environment
     use_image = obs_type == "image"
     env = EnvUtils.create_env_from_metadata(
@@ -419,6 +485,32 @@ def make_robomimic_env(
         render_offscreen=use_image,
         use_image_obs=use_image,
     )
+
+    # Patch get_observation for DexMimicGen envs (no 'object-state' key)
+    if env_name in DEXMIMICGEN_ENVS:
+        import robomimic.utils.obs_utils as ObsUtils
+        _robomimic_env = env  # this is the EnvRobosuite before any wrapping
+
+        def _patched_get_obs(di=None):
+            if di is None:
+                di = _robomimic_env.env._get_observations(force_update=True)
+            ret = {}
+            for k in di:
+                if (k in ObsUtils.OBS_KEYS_TO_MODALITIES) and ObsUtils.key_is_obs_modality(key=k, obs_modality="rgb"):
+                    ret[k] = di[k][::-1]
+                    if _robomimic_env.postprocess_visual_obs:
+                        ret[k] = ObsUtils.process_obs(obs=ret[k], obs_key=k)
+            # Skip 'object-state' — DexMimicGen dual-arm envs don't have it
+            if "object-state" in di:
+                ret["object"] = np.array(di["object-state"])
+            for robot in _robomimic_env.env.robots:
+                pf = robot.robot_model.naming_prefix
+                for k in di:
+                    if k.startswith(pf) and (k not in ret) and (not k.endswith("proprio-state")):
+                        ret[k] = np.array(di[k])
+            return ret
+
+        _robomimic_env.get_observation = _patched_get_obs
 
     # Wrap environment
     if obs_type == "image":

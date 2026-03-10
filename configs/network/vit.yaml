@@ -1,0 +1,16 @@
+# ViT network configuration
+
+name: vit
+image_backbone: vit
+vit_embed_dim: 128
+vit_num_heads: 4
+vit_depth: 1
+vit_ffn_mult: 4
+
+# Flow network (MLP) parameters
+emb_dim: 512
+n_blocks: 6
+expansion_factor: 4
+dropout: 0.1
+timestep_emb_dim: 128
+max_freq: 100.0

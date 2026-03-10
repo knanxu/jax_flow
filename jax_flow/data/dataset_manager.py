@@ -29,6 +29,21 @@ class DatasetManager:
         "hammer_cleanup", "mug_cleanup", "pick_place", "nut_assembly",
     }
 
+    # DexMimicGen tasks (stored under ~/.dexmimicgen/datasets/)
+    DEXMIMICGEN_TASKS = {
+        "two_arm_threading", "two_arm_three_piece_assembly", "two_arm_transport",
+    }
+
+    # DexMimicGen task name -> HuggingFace filename mapping
+    DEXMIMICGEN_HF_MAP = {
+        "two_arm_threading": "generated/two_arm_threading.hdf5",
+        "two_arm_three_piece_assembly": "generated/two_arm_three_piece_assembly.hdf5",
+        "two_arm_transport": "generated/two_arm_transport.hdf5",
+    }
+
+    # DexMimicGen base directory
+    DEXMIMICGEN_DIR = Path.home() / ".dexmimicgen" / "datasets"
+
     @staticmethod
     def resolve_dataset_path(
         dataset_path: str,
@@ -66,6 +81,12 @@ class DatasetManager:
             return rel_path
 
         hdf5_type = "low_dim" if obs_type == "lowdim" else "image"
+
+        # Try DexMimicGen path: ~/.dexmimicgen/datasets/{task}/ph/
+        if task in DatasetManager.DEXMIMICGEN_TASKS:
+            dex_path = DatasetManager.DEXMIMICGEN_DIR / task / dataset_type / f"{hdf5_type}_v141.hdf5"
+            if dex_path.exists():
+                return dex_path
 
         # Try MimicGen path: ~/.robomimic/mimicgen/core/{task}/{dataset_type}/
         mimicgen_path = DatasetManager.ROBOMIMIC_DIR / "mimicgen" / "core" / task / dataset_type / f"{hdf5_type}_v141.hdf5"
@@ -142,6 +163,8 @@ class DatasetManager:
             return DatasetManager._download_robomimic(task, dataset_type, obs_type)
         elif source == "mimicgen":
             return DatasetManager._download_mimicgen(task, dataset_type, obs_type)
+        elif source == "dexmimicgen":
+            return DatasetManager._download_dexmimicgen(task, dataset_type, obs_type)
         else:
             print(f"Error: Unknown source '{source}'")
             return False
@@ -299,6 +322,87 @@ class DatasetManager:
         return target_path.exists()
 
     @staticmethod
+    def _download_dexmimicgen(task: str, dataset_type: str, obs_type: str) -> bool:
+        """Download from HuggingFace DexMimicGen datasets and convert.
+
+        DexMimicGen files on HuggingFace (MimicGen/dexmimicgen_datasets) are
+        `panda/{CamelCaseName}_demo.hdf5`. We download the raw file, then convert
+        to lowdim format using convert_dexmimicgen.py.
+        """
+        import os
+
+        if task not in DatasetManager.DEXMIMICGEN_HF_MAP:
+            print(f"Error: Unknown DexMimicGen task '{task}'")
+            print(f"Available: {sorted(DatasetManager.DEXMIMICGEN_TASKS)}")
+            return False
+
+        hf_filename = DatasetManager.DEXMIMICGEN_HF_MAP[task]
+        raw_path = DatasetManager.DEXMIMICGEN_DIR / hf_filename
+
+        # Step 1: Download raw file if not present
+        if not raw_path.exists():
+            print(f"Downloading {hf_filename} from HuggingFace...")
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+
+            url = f"https://huggingface.co/datasets/MimicGen/dexmimicgen_datasets/resolve/main/{hf_filename}"
+
+            env = os.environ.copy()
+            env.pop("ALL_PROXY", None)
+            env.pop("all_proxy", None)
+
+            try:
+                subprocess.run(
+                    ["wget", "-c", "-q", "--show-progress", url, "-O", str(raw_path)],
+                    env=env,
+                    check=True,
+                    timeout=3600,
+                )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+                print(f"wget failed ({e}), trying huggingface_hub...")
+                try:
+                    from huggingface_hub import hf_hub_download  # type: ignore
+                    hf_hub_download(
+                        repo_id="MimicGen/dexmimicgen_datasets",
+                        filename=hf_filename,
+                        repo_type="dataset",
+                        local_dir=str(DatasetManager.DEXMIMICGEN_DIR),
+                    )
+                except Exception as e2:
+                    print(f"Error: {e2}")
+                    if raw_path.exists():
+                        raw_path.unlink()
+                    return False
+
+        if not raw_path.exists():
+            print(f"Error: raw file not found at {raw_path}")
+            return False
+
+        print(f"Raw file: {raw_path} ({raw_path.stat().st_size / 1024**3:.1f} GB)")
+
+        # Step 2: Convert to lowdim/image format
+        hdf5_type = "low_dim" if obs_type == "lowdim" else "image"
+        target_path = DatasetManager.DEXMIMICGEN_DIR / task / dataset_type / f"{hdf5_type}_v141.hdf5"
+
+        if target_path.exists():
+            print(f"Converted file already exists: {target_path}")
+            return True
+
+        print(f"Converting to {obs_type} format...")
+        try:
+            convert_script = Path(__file__).parent.parent.parent / "scripts" / "convert_dexmimicgen.py"
+            subprocess.run(
+                ["python", str(convert_script), "--input", str(raw_path), "--task", task],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            print(f"Conversion failed: {e.stderr}")
+            return False
+
+        return target_path.exists()
+
+    @staticmethod
     def ensure_dataset(
         dataset_path: str,
         task: str,
@@ -337,6 +441,8 @@ class DatasetManager:
         # Auto-detect source from task name
         if source == "robomimic" and task in DatasetManager.MIMICGEN_TASKS:
             source = "mimicgen"
+        elif source == "robomimic" and task in DatasetManager.DEXMIMICGEN_TASKS:
+            source = "dexmimicgen"
 
         # Auto-download
         print(f"✗ Dataset not found, attempting automatic download ({source})...")

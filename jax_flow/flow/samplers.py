@@ -84,36 +84,40 @@ def heun_sampler(network, encoder, observations, num_steps, rng, config):
 
 
 def mip_sampler(network, encoder, observations, num_steps, rng, config):
-    """MIP (two-step) sampler.
+    """MIP (two-step) sampler following much-ado-about-noising.
+
+    Step 1: velocity_0 = network(zeros, s=0, s=0, cond)
+    Step 2: velocity_1 = network(velocity_0, s=t_two_step, s=t_two_step, cond)
+    Output: velocity_1 (the final action prediction)
 
     Args:
         network: Flow network.
         encoder: Observation encoder.
         observations: Observations.
-        num_steps: Unused for MIP.
+        num_steps: Unused for MIP (always 2 steps).
         rng: Random key (unused).
-        config: Configuration dict.
+        config: Configuration dict with 't_two_step'.
 
     Returns:
-        Sampled actions.
+        Sampled actions. Shape: (batch, horizon, action_dim)
     """
     batch_size = get_batch_size(observations)
     horizon = config.get("horizon", 10)
     action_dim = config.get("action_dim", 7)
+    t_two_step = config.get("t_two_step", 0.9)
 
     cond = encoder(observations, training=False, rngs={})
 
-    # Step 1: Predict from zeros
+    # Step 1: predict from zeros at s=0
     s0 = jnp.zeros((batch_size,))
     x0 = jnp.zeros((batch_size, horizon, action_dim))
-    pred_step1 = network(x0, s0, s0, cond, training=False)
+    act_pred_0 = network(x0, s0, s0, cond, training=False)
 
-    # Step 2: Predict from step 1 output
-    t_two_step = config.get("t_two_step", 0.9)
+    # Step 2: feed step1 output as input at s=t_two_step
     st = jnp.full((batch_size,), t_two_step)
-    pred_step2 = network(pred_step1, st, st, cond, training=False)
+    act_pred_1 = network(act_pred_0, st, st, cond, training=False)
 
-    return pred_step2
+    return act_pred_1
 
 
 def meanflow_sampler(network, encoder, observations, num_steps, rng, config):
@@ -136,10 +140,15 @@ def meanflow_sampler(network, encoder, observations, num_steps, rng, config):
     batch_size = get_batch_size(observations)
     horizon = config.get("horizon", 10)
     action_dim = config.get("action_dim", 7)
+    sample_mode = config.get("sample_mode", "stochastic")
 
     cond = encoder(observations, training=False, rngs={})
 
-    x0 = jax.random.normal(rng, (batch_size, horizon, action_dim))
+    if sample_mode == "zero":
+        x0 = jnp.zeros((batch_size, horizon, action_dim))
+    else:
+        x0 = jax.random.normal(rng, (batch_size, horizon, action_dim))
+
     s = jnp.zeros((batch_size,))
     t = jnp.ones((batch_size,))
 

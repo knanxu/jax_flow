@@ -229,6 +229,7 @@ class BCAgent(flax.struct.PyTreeNode):
                 batch=batch,
                 rng=rng,
                 config=self.config,
+                step=self.network.step,
             )
 
         new_network, info = self.network.apply_loss_fn(loss_fn=loss_fn)

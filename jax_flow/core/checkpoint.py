@@ -132,3 +132,74 @@ def cleanup_old_checkpoints(checkpoint_dir: Union[str, Path], keep_last_n: int =
         for old_checkpoint in checkpoint_files[:-keep_last_n]:
             old_checkpoint.unlink()
             print(f"✓ Removed old checkpoint: {old_checkpoint.name}")
+
+
+def save_resfit_checkpoint(
+    checkpoint_path: Union[str, Path],
+    agent: Any,
+    step: int,
+    bc_checkpoint_path: str = "",
+    normalizers: Optional[Dict[str, Any]] = None,
+    best_success_rate: Optional[float] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+):
+    """Save ResFiT checkpoint with multiple TrainStates.
+
+    Args:
+        checkpoint_path: Path to save checkpoint.
+        agent: ResFiTAgent instance.
+        step: Current training step.
+        bc_checkpoint_path: Path to BC checkpoint (for restoring BC policy).
+        normalizers: Dict of normalizers.
+        best_success_rate: Best evaluation success rate so far.
+        metadata: Additional metadata.
+    """
+    checkpoint_path = Path(checkpoint_path) if isinstance(checkpoint_path, str) else checkpoint_path
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+    checkpoint = {
+        # Encoder
+        "encoder_params": agent.encoder_state.params,
+        "encoder_opt_state": agent.encoder_state.opt_state,
+        "encoder_step": agent.encoder_state.step,
+        # Critic
+        "critic_params": agent.critic_state.params,
+        "critic_opt_state": agent.critic_state.opt_state,
+        "critic_step": agent.critic_state.step,
+        # Actor
+        "actor_params": agent.actor_state.params,
+        "actor_opt_state": agent.actor_state.opt_state,
+        "actor_step": agent.actor_state.step,
+        # Targets
+        "target_critic_params": agent.target_critic_params,
+        "target_actor_params": agent.target_actor_params,
+        # Agent state
+        "rng": agent.rng,
+        "config": agent.config,
+        "training_step": step,
+        "bc_checkpoint_path": bc_checkpoint_path,
+    }
+
+    if normalizers is not None:
+        checkpoint["normalizers"] = normalizers
+    if best_success_rate is not None:
+        checkpoint["best_success_rate"] = best_success_rate
+    if metadata is not None:
+        checkpoint["metadata"] = metadata
+
+    with open(checkpoint_path, "wb") as f:
+        pickle.dump(checkpoint, f)
+
+    print(f"Checkpoint saved to {checkpoint_path}")
+
+
+def load_resfit_checkpoint(checkpoint_path: Union[str, Path]) -> Dict[str, Any]:
+    """Load ResFiT checkpoint from disk.
+
+    Args:
+        checkpoint_path: Path to checkpoint file.
+
+    Returns:
+        Checkpoint dict with encoder/actor/critic params, targets, config, etc.
+    """
+    return load_checkpoint(checkpoint_path)

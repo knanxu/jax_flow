@@ -1,0 +1,22 @@
+# MIP (Minimum Iterative Policy) configuration
+
+name: mip
+policy_type: mip
+
+# Interpolant configuration (not used in MIP loss, but needed for interface)
+interp_type: linear
+
+# Sampler configuration
+sampler:
+  type: mip
+  num_steps: 1       # MIP uses two-step internally
+  deterministic: true
+  sample_mode: zero
+
+# MIP specific
+t_two_step: 0.9
+
+# Loss computation
+loss:
+  norm_type: l2
+  scale: 0.1

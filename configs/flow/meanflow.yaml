@@ -12,12 +12,19 @@ sampler:
   num_steps: 1       # MeanFlow uses single-step sampling
   deterministic: true
   adaptive_step: false
+  sample_mode: zero   # zero initialization for MeanFlow sampling
 
 # MeanFlow specific parameters
 time_sampling:
   mu: -0.4           # Mean of normal distribution before sigmoid
   sigma: 1.0         # Std of normal distribution before sigmoid
   ratio_equal: 0.25  # Ratio of samples where s=t (25% s=t, 75% s≠t)
+
+# Delta-t progressive schedule for MeanFlow self-distillation
+delta_t_schedule:
+  warmup_ratio: 0.1    # delta_t=0 phase ratio (pure flow matching warmup)
+  rampup_ratio: 0.5    # linear ramp from 0 to max_delta_t phase ratio
+  max_delta_t: 1.0     # maximum delta_t
 
 # Adaptive weighting for loss
 adaptive_weight:

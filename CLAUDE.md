@@ -93,14 +93,24 @@ python scripts/convert_mimicgen.py --input ~/.robomimic/mimicgen/core/stack_d0.h
 
 # 批量转换所有已下载的 MimicGen 原始文件
 python scripts/convert_mimicgen.py --all
+
+# DexMimicGen 数据集（一键下载+转换全部 3 个 Panda 双臂任务）
+python scripts/download_dexmimicgen.py
+
+# DexMimicGen 单任务下载+转换
+python scripts/download_dexmimicgen.py --tasks two_arm_threading
+
+# 批量转换所有已下载的 DexMimicGen 原始文件
+python scripts/convert_dexmimicgen.py --all
 ```
 
 **数据源对比**：
 - **Robomimic**: lift, can, square, transport, tool_hang（lowdim 可直接下载，image 需从 demo 生成）
 - **MimicGen**: stack, stack_three, threading, coffee, kitchen, hammer_cleanup, mug_cleanup, pick_place, nut_assembly（HuggingFace 下载 `{task}_d0.hdf5` 后用 `convert_mimicgen.py` 转换）
+- **DexMimicGen**: two_arm_threading, two_arm_three_piece_assembly, two_arm_transport（Panda 双臂任务，HuggingFace `MimicGen/dexmimicgen_datasets` 下载后用 `convert_dexmimicgen.py` 转换，存储于 `~/.dexmimicgen/datasets/`）
 
-数据集路径优先级：绝对路径 > 项目相对路径 > ~/.robomimic/mimicgen/core/ > ~/.robomimic/ > 自动下载
-DatasetManager 会自动根据 task 名判断数据源（MIMICGEN_TASKS 集合中的任务自动走 mimicgen 路径）
+数据集路径优先级：绝对路径 > 项目相对路径 > ~/.dexmimicgen/datasets/ > ~/.robomimic/mimicgen/core/ > ~/.robomimic/ > 自动下载
+DatasetManager 会自动根据 task 名判断数据源（MIMICGEN_TASKS / DEXMIMICGEN_TASKS 集合中的任务自动走对应路径）
 
 ### Testing
 ```bash
@@ -129,6 +139,7 @@ pyright jax_flow/
 
 2. **Agents** (`jax_flow/agents/`)
    - `BCAgent`: Flow matching BC, immutable PyTreeNode
+   - `ResFiTAgent`: Residual RL fine-tuning (TD3 + RED-Q + 残差动作), 3 独立 TrainState
    - `ACFQLAgent`: Offline-to-online RL (待完善)
    - Pattern: `create()` → `update(batch)` → `sample_actions(obs)`
 
@@ -142,21 +153,22 @@ pyright jax_flow/
    - `mlp.py`: MLP，`@nn.compact`，输入 `(at, s, t, obs)` 输出 `velocity`
    - `unet.py`: 1D UNet for sequence modeling
    - `transformer.py`: DiT-style transformer
-   - `value.py`: Q-function ensemble (nn.vmap)
+   - `value.py`: Q-function ensemble (nn.vmap), 支持 RED-Q (num_ensembles=10)
+   - `residual_actor.py`: 残差策略网络 + `add_exploration_noise()` 探索噪声
+   - `spatial_emb_critic.py`: SpatialEmbCritic + `redq_q_value` / `ensemble_mean_q` 工具函数
    - `embeddings.py`: Fourier / Learned timestep embeddings
-   - `encoders/`: ResNet18Encoder, SpatialSoftmax, MultiImageEncoder
+   - `encoders/`: ResNet18Encoder, SpatialSoftmax, MultiImageEncoder, MinViTEncoder, RandomShiftsAug
 
 5. **Data** (`jax_flow/data/`)
    - `robomimic_dataset.py`: Lowdim HDF5 dataset, per-episode 存储 + 全局索引
    - `robomimic_image_dataset.py`: Image HDF5 dataset, 支持多相机 + lowdim 混合
    - `normalizer.py`: MinMax, Image, Identity normalizers
-   - `dataset_manager.py`: 自动下载和路径解析，支持 robomimic/mimicgen，智能处理 image 数据集
+   - `dataset_manager.py`: 自动下载和路径解析，支持 robomimic/mimicgen/dexmimicgen，智能处理 image 数据集
+   - `replay_buffer.py`: NumPy 环形 replay buffer, 支持 dict obs + N-step returns + offline 填充
 
-6. **Environments** (`jax_flow/envs/robomimic_env.py`)
-   - `RobomimicWrapper`: Lowdim obs, normalized actions
-   - `RobomimicImageWrapper`: Dict obs (images + lowdim)
-   - `FrameStackWrapper`: 观测历史堆叠（支持 array 和 dict obs）
-   - `ActionChunkingWrapper`: 执行 action 序列的前 N 步
+6. **Environments** (`jax_flow/envs/`)
+   - `robomimic_env.py`: RobomimicWrapper, RobomimicImageWrapper, FrameStackWrapper, ActionChunkingWrapper, DEXMIMICGEN_ENVS 注册表（自动推断双臂 obs/image keys）
+   - `residual_wrapper.py`: ResidualEnvWrapper — 内嵌冻结 BC 策略，管理 action queue，RL agent 只输出单步残差
 
 7. **Configuration** (`configs/`)
    - Hydra + OmegaConf, YAML 格式
@@ -243,10 +255,21 @@ configs/
 - [x] MimicGen 数据集下载+转换支持（`download_mimicgen.py`, `convert_mimicgen.py`）
 - [x] DatasetManager 适配 MimicGen 路径结构，自动检测数据源
 - [x] robomimic_env 兼容 MimicGen 的 env_name 和 controller 格式
+- [x] DexMimicGen Panda 双臂任务集成（3 任务 × lowdim/image，DEXMIMICGEN_ENVS 注册表自动推断 obs keys）
 - [ ] 完善 ACFQLAgent
 - [ ] MeanFlow 完整实现 (JVP)
 - [ ] UNet / Transformer networks
 - [ ] 图像数据增强 (random crop, color jitter)
+
+**Phase 6: ResFiT RL Fine-Tuning** (✅ Completed)
+- [x] ReplayBuffer (NumPy 环形 buffer + N-step returns + dict obs)
+- [x] RandomShiftsAug (DrQ 风格随机平移增强)
+- [x] ResidualActor 添加 `add_exploration_noise()`
+- [x] ResidualEnvWrapper (内嵌冻结 BC + action queue 管理)
+- [x] ResFiTAgent (3 独立 TrainState + RED-Q + TD3)
+- [x] Checkpoint 扩展 (`save/load_resfit_checkpoint`)
+- [x] 训练脚本 `scripts/train_resfit.py` + 配置 `configs/resfit/`
+- [ ] 端到端训练验证（需要 BC checkpoint）
 
 ## References
 

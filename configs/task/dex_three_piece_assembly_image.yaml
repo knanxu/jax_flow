@@ -1,0 +1,49 @@
+# DexMimicGen TwoArmThreePieceAssembly task with image observations
+
+name: dex_three_piece_assembly_image
+env_name: TwoArmThreePieceAssembly
+dataset_name: two_arm_three_piece_assembly
+obs_type: image
+
+# Dataset configuration
+dataset:
+  path: data/dexmimicgen/two_arm_three_piece_assembly/ph/image_v141.hdf5
+  dataset_type: ph
+  horizon: 16
+  obs_steps: 2
+  act_steps: 8
+
+  # Image observation keys
+  image_keys: ['agentview_image', 'robot0_eye_in_hand_image', 'robot1_eye_in_hand_image']
+
+  # Low-dimensional observation keys (mixed with images)
+  lowdim_keys: ['robot0_eef_pos', 'robot0_eef_quat', 'robot0_gripper_qpos', 'robot1_eef_pos', 'robot1_eef_quat', 'robot1_gripper_qpos']
+
+  # Image processing
+  image_size: [84, 84]
+  crop_shape: [76, 76]
+
+  # Normalization
+  normalize_obs: true
+  normalize_act: true
+  norm_type: min_max
+
+# Environment configuration
+env:
+  max_episode_steps: 300
+  use_camera_obs: true
+
+# Action dimension
+act_dim: 14
+
+# Observation keys
+obs_keys:
+  - agentview_image
+  - robot0_eye_in_hand_image
+  - robot1_eye_in_hand_image
+  - robot0_eef_pos
+  - robot0_eef_quat
+  - robot0_gripper_qpos
+  - robot1_eef_pos
+  - robot1_eef_quat
+  - robot1_gripper_qpos

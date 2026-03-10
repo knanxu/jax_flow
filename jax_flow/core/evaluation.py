@@ -22,7 +22,7 @@ def rollout_episode(
 
     while not done and episode_length < max_steps:
         if isinstance(obs, dict):
-            obs_batch = {k: v[np.newaxis, ...] for k, v in obs.items()}
+            obs_batch = {k: np.array(v[np.newaxis, ...]) for k, v in obs.items()}
         else:
             obs_batch = obs[np.newaxis, ...]
 
@@ -35,6 +35,8 @@ def rollout_episode(
         else:
             action_seq = None
 
+        # For residual agents: action_seq is (action_dim,) single step
+        # For BC agents: action_seq is (horizon, action_dim) chunk or None
         obs, reward, terminated, truncated, info = env.step(action_seq)
         done = terminated or truncated
         episode_length += 1

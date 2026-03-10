@@ -48,7 +48,7 @@ pip install -e .[robomimic]
 
 ## 数据准备
 
-项目支持两类数据源：**Robomimic**（5 个任务）和 **MimicGen**（9 个任务）。所有数据统一存放在 `~/.robomimic/` 目录下。
+项目支持两类数据源：**Robomimic**（5 个任务）和 **MimicGen**（9 个任务）和 **DexMimicGen**（3 个 Panda 双臂任务）。所有数据统一存放在 `~/.robomimic/` 或 `~/.dexmimicgen/` 目录下。
 
 ### 数据源对比
 
@@ -56,6 +56,7 @@ pip install -e .[robomimic]
 |--------|------|--------|-------|------|
 | Robomimic | lift, can, square, transport, tool_hang | 直接下载 | 需从 demo 生成 | robomimic 官方数据 |
 | MimicGen | stack, stack_three, threading, coffee, kitchen, hammer_cleanup, mug_cleanup, pick_place, nut_assembly | 下载+转换 | 下载+转换 | HuggingFace 上的 MimicGen 数据 |
+| DexMimicGen | two_arm_threading, two_arm_three_piece_assembly, two_arm_transport | 下载+转换 | 下载+转换 | Panda 双臂任务，act_dim=14 |
 
 ### 数据目录结构
 
@@ -74,6 +75,19 @@ pip install -e .[robomimic]
     ├── coffee/ph/
     │   ├── low_dim_v141.hdf5
     │   └── image_v141.hdf5
+    └── ...
+
+~/.dexmimicgen/datasets/
+├── panda/
+│   ├── TwoArmThreading_demo.hdf5             # DexMimicGen 原始文件
+│   ├── TwoArmThreePieceAssembly_demo.hdf5
+│   └── TwoArmTransport_demo.hdf5
+├── two_arm_threading/ph/
+│   ├── low_dim_v141.hdf5                     # 转换后的 lowdim (双臂, 无 object)
+│   └── image_v141.hdf5                       # symlink -> 原始文件
+├── two_arm_three_piece_assembly/ph/
+│   └── ...
+└── two_arm_transport/ph/
     └── ...
 ```
 
@@ -150,14 +164,65 @@ pip install "mimicgen @ git+https://github.com/NVlabs/mimicgen.git"
 |-------------|----------------------------------------------|
 | stack, nut_assembly, pick_place | stack_three, threading, coffee, kitchen, hammer_cleanup, mug_cleanup |
 
+### DexMimicGen 数据集（Panda 双臂任务）
+
+DexMimicGen 提供 3 个 Panda 双臂操作任务，数据在 HuggingFace `MimicGen/dexmimicgen_datasets` 上以 `panda/{TaskName}_demo.hdf5` 格式存储。
+
+| 任务 | env_name | act_dim | lowdim obs_dim | Horizon | Image cameras |
+|------|----------|---------|----------------|---------|---------------|
+| two_arm_threading | TwoArmThreading | 14 | 18 | 400 | 3 |
+| two_arm_three_piece_assembly | TwoArmThreePieceAssembly | 14 | 18 | 300 | 3 |
+| two_arm_transport | TwoArmTransport | 14 | 18 | 1200 | 5 |
+
+Lowdim obs keys（3 个任务相同，无 object state）：`robot0_eef_pos(3)`, `robot0_eef_quat(4)`, `robot0_gripper_qpos(2)`, `robot1_eef_pos(3)`, `robot1_eef_quat(4)`, `robot1_gripper_qpos(2)`
+
+**环境依赖：**
+
+```bash
+# 安装 dexmimicgen（注册 TwoArm* 环境到 robosuite）
+pip install -e /path/to/dexmimicgen
+```
+
+**数据准备（推荐一键下载）：**
+
+```bash
+# 下载全部 3 个任务并转换
+python scripts/download_dexmimicgen.py
+
+# 下载指定任务
+python scripts/download_dexmimicgen.py --tasks two_arm_threading
+
+# 仅转换已下载的原始文件
+python scripts/convert_dexmimicgen.py --all
+```
+
+**训练：**
+
+```bash
+# Lowdim 训练
+python scripts/train_bc.py task=dex_threading_lowdim
+python scripts/train_bc.py task=dex_three_piece_assembly_lowdim
+python scripts/train_bc.py task=dex_transport_lowdim
+
+# Image 训练
+python scripts/train_bc.py task=dex_threading_image
+python scripts/train_bc.py task=dex_transport_image
+
+# 自定义参数
+python scripts/train_bc.py task=dex_threading_lowdim optimization.lr=3e-4 wandb.enabled=false
+```
+
+框架会根据 `env_name` 自动推断双臂 obs keys、image keys 和 max_episode_steps（通过 `DEXMIMICGEN_ENVS` 注册表），YAML 配置中也可以显式指定覆盖默认值。
+
 ### 数据集路径解析优先级
 
 `DatasetManager` 按以下顺序查找数据集：
 1. 绝对路径（如果存在）
 2. 项目根目录的相对路径
-3. `~/.robomimic/mimicgen/core/{task}/ph/`（MimicGen 任务）
-4. `~/.robomimic/{task}/ph/`（Robomimic 任务，v15 然后 v141）
-5. 返回配置中的路径（可能不存在，触发自动下载）
+3. `~/.dexmimicgen/datasets/{task}/ph/`（DexMimicGen 任务）
+4. `~/.robomimic/mimicgen/core/{task}/ph/`（MimicGen 任务）
+5. `~/.robomimic/{task}/ph/`（Robomimic 任务，v15 然后 v141）
+6. 返回配置中的路径（可能不存在，触发自动下载）
 
 ## 快速开始
 
