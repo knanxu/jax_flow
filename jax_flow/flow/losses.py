@@ -6,6 +6,18 @@ import jax.numpy as jnp
 from jax_flow.core.utils import get_batch_size
 
 
+def _per_sample_loss(error_sq):
+    """Reduce squared error to per-sample scalar: sum over act_dim, mean over horizon.
+
+    Args:
+        error_sq: (batch, horizon, action_dim)
+
+    Returns:
+        (batch,) per-sample loss.
+    """
+    return jnp.mean(jnp.sum(error_sq, axis=-1), axis=-1)
+
+
 def flow_loss(network, encoder, interpolant, batch, rng, config, step=None):
     """Standard flow matching loss.
 
@@ -55,9 +67,7 @@ def flow_loss(network, encoder, interpolant, batch, rng, config, step=None):
     predicted_velocity = network(x_t, t, t, cond, training=True)
 
     # Compute loss: sum over act_dim, mean over horizon and batch
-    # Matches much-ado: get_norm(sum over dim=-1) then torch.mean(over batch & horizon)
-    per_timestep = jnp.sum((predicted_velocity - target_velocity) ** 2, axis=-1)  # (batch, horizon)
-    per_sample = jnp.mean(per_timestep, axis=-1)  # (batch,)
+    per_sample = _per_sample_loss((predicted_velocity - target_velocity) ** 2)
     if "sample_weights" in batch:
         loss = jnp.mean(batch["sample_weights"] * per_sample)
     else:
@@ -119,8 +129,8 @@ def mip_loss(network, encoder, interpolant, batch, rng, config, step=None):
     pred_step2 = network(act_t, st, st, cond, training=True)
 
     # Per-sample: sum over act_dim, mean over horizon, normalized by time scale
-    per_sample1 = jnp.mean(jnp.sum((pred_step1 - actions) ** 2, axis=-1), axis=-1) / (t_two_step**2)
-    per_sample2 = jnp.mean(jnp.sum((pred_step2 - actions) ** 2, axis=-1), axis=-1) / ((1 - t_two_step) ** 2)
+    per_sample1 = _per_sample_loss((pred_step1 - actions) ** 2) / (t_two_step**2)
+    per_sample2 = _per_sample_loss((pred_step2 - actions) ** 2) / ((1 - t_two_step) ** 2)
 
     if "sample_weights" in batch:
         w = batch["sample_weights"]
@@ -296,7 +306,7 @@ def mf_loss(network, encoder, interpolant, batch, rng, config, step=None):
     v_target = interpolant.velocity(t_flow, x0, x1)
     v_pred = network(x_t_flow, t_flow, t_flow, cond, training=True)  # s=t
 
-    fm_per_sample = jnp.mean(jnp.sum((v_pred - v_target) ** 2, axis=-1), axis=-1)
+    fm_per_sample = _per_sample_loss((v_pred - v_target) ** 2)
 
     # === Term 2: MeanFlow self-distillation with delta_t schedule ===
     # Enforce identity (*): u = v_s + (t - s) * d/ds u
@@ -336,12 +346,12 @@ def mf_loss(network, encoder, interpolant, batch, rng, config, step=None):
     if aw_cfg.get("enabled", False):
         c = aw_cfg.get("c", 0.01)
         p = aw_cfg.get("p", 1.0)
-        per_sample_error = jnp.mean(jnp.sum(error_sq, axis=-1), axis=-1)
+        per_sample_error = _per_sample_loss(error_sq)
         w = 1.0 / (per_sample_error + c) ** p
         w = jax.lax.stop_gradient(w)
         mf_per_sample = w * per_sample_error
     else:
-        mf_per_sample = jnp.mean(jnp.sum(error_sq, axis=-1), axis=-1)
+        mf_per_sample = _per_sample_loss(error_sq)
 
     # === Combine with optional sample weights ===
     loss_scale = config.get("loss_scale", 0.1)
@@ -447,7 +457,7 @@ def imf_loss(network, encoder, interpolant, batch, rng, config, step=None):
     v_target = interpolant.velocity(t_flow, x0, x1)
     v_pred = network(x_t_flow, t_flow, t_flow, cond, training=True)  # s=t
 
-    fm_per_sample = jnp.mean(jnp.sum((v_pred - v_target) ** 2, axis=-1), axis=-1)
+    fm_per_sample = _per_sample_loss((v_pred - v_target) ** 2)
 
     # === Term 2: Improved MeanFlow v-loss with delta_t schedule ===
     # Enforce identity (**): v_s = u - (t - s) * d/ds u
@@ -490,12 +500,12 @@ def imf_loss(network, encoder, interpolant, batch, rng, config, step=None):
     if aw_cfg.get("enabled", False):
         c = aw_cfg.get("c", 0.01)
         p = aw_cfg.get("p", 1.0)
-        per_sample_error = jnp.mean(jnp.sum(error_sq, axis=-1), axis=-1)
+        per_sample_error = _per_sample_loss(error_sq)
         w = 1.0 / (per_sample_error + c) ** p
         w = jax.lax.stop_gradient(w)
         imf_per_sample = w * per_sample_error
     else:
-        imf_per_sample = jnp.mean(jnp.sum(error_sq, axis=-1), axis=-1)
+        imf_per_sample = _per_sample_loss(error_sq)
 
     # === Combine with optional sample weights ===
     loss_scale = config.get("loss_scale", 0.1)

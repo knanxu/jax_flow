@@ -24,6 +24,64 @@ def _ema_update(ema_params, new_params, decay):
     )
 
 
+def _create_flow_def(network_type, action_dim, config, cond_dim=None):
+    """Create flow network definition based on network_type.
+
+    Args:
+        network_type: One of 'mlp', 'small_mlp', 'unet', 'transformer'.
+        action_dim: Action dimension.
+        config: Configuration dict.
+        cond_dim: Conditioning dimension (used by unet/transformer, ignored by mlp/small_mlp).
+
+    Returns:
+        Flow network module definition.
+    """
+    from jax_flow.networks.mlp import MLP, SmallMLP
+    from jax_flow.networks.transformer import TransformerForFlow
+    from jax_flow.networks.unet import ConditionalUnet1D
+
+    if network_type == "mlp":
+        return MLP(
+            action_dim=action_dim,
+            emb_dim=config.get("emb_dim", 512),
+            n_blocks=config.get("n_blocks", 6),
+            expansion_factor=config.get("expansion_factor", 4),
+            dropout=config.get("dropout", 0.1),
+            timestep_embed_dim=config.get("timestep_embed_dim", 128),
+            max_freq=config.get("max_freq", 100.0),
+        )
+    elif network_type == "small_mlp":
+        return SmallMLP(
+            action_dim=action_dim,
+            hidden_dims=tuple(config.get("hidden_dims", (512, 512, 512, 512))),
+            timestep_embed_dim=config.get("timestep_embed_dim", 128),
+            max_freq=config.get("max_freq", 100.0),
+            layer_norm=config.get("layer_norm", True),
+        )
+    elif network_type == "unet":
+        return ConditionalUnet1D(
+            action_dim=action_dim,
+            down_dims=tuple(config.get("down_dims", (256, 512, 1024))),
+            kernel_size=config.get("kernel_size", 5),
+            n_groups=config.get("n_groups", 8),
+            cond_dim=cond_dim or config.get("emb_dim", 256),
+            timestep_embed_dim=config.get("timestep_embed_dim", 256),
+            cond_predict_scale=config.get("cond_predict_scale", False),
+        )
+    elif network_type == "transformer":
+        return TransformerForFlow(
+            action_dim=action_dim,
+            n_layer=config.get("n_layer", 4),
+            n_head=config.get("n_head", 4),
+            n_emb=config.get("n_emb", 256),
+            cond_dim=cond_dim or config.get("emb_dim", 256),
+            dropout=config.get("dropout", 0.1),
+            timestep_embed_dim=config.get("timestep_embed_dim", 128),
+        )
+    else:
+        raise ValueError(f"Unknown network type: {network_type}")
+
+
 class BCAgent(flax.struct.PyTreeNode):
     """Behavior Cloning agent using flow matching.
 
@@ -54,9 +112,6 @@ class BCAgent(flax.struct.PyTreeNode):
             New BCAgent instance.
         """
         from jax_flow.networks.encoders import create_encoder
-        from jax_flow.networks.mlp import MLP, SmallMLP
-        from jax_flow.networks.transformer import TransformerForFlow
-        from jax_flow.networks.unet import ConditionalUnet1D
 
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng)
@@ -76,48 +131,9 @@ class BCAgent(flax.struct.PyTreeNode):
             crop_shape=config.get("crop_shape", None),
         )
 
-        # Create flow network based on network_type
+        # Create flow network (initial, may be rebuilt with actual cond_dim)
         network_type = config.get("network_type", "mlp")
-        if network_type == "mlp":
-            flow_def = MLP(
-                action_dim=action_dim,
-                emb_dim=config.get("emb_dim", 512),
-                n_blocks=config.get("n_blocks", 6),
-                expansion_factor=config.get("expansion_factor", 4),
-                dropout=config.get("dropout", 0.1),
-                timestep_embed_dim=config.get("timestep_embed_dim", 128),
-                max_freq=config.get("max_freq", 100.0),
-            )
-        elif network_type == "unet":
-            flow_def = ConditionalUnet1D(
-                action_dim=action_dim,
-                down_dims=tuple(config.get("down_dims", (256, 512, 1024))),
-                kernel_size=config.get("kernel_size", 5),
-                n_groups=config.get("n_groups", 8),
-                cond_dim=config.get("emb_dim", 256),
-                timestep_embed_dim=config.get("timestep_embed_dim", 256),
-                cond_predict_scale=config.get("cond_predict_scale", False),
-            )
-        elif network_type == "small_mlp":
-            flow_def = SmallMLP(
-                action_dim=action_dim,
-                hidden_dims=tuple(config.get("hidden_dims", (512, 512, 512, 512))),
-                timestep_embed_dim=config.get("timestep_embed_dim", 128),
-                max_freq=config.get("max_freq", 100.0),
-                layer_norm=config.get("layer_norm", True),
-            )
-        elif network_type == "transformer":
-            flow_def = TransformerForFlow(
-                action_dim=action_dim,
-                n_layer=config.get("n_layer", 4),
-                n_head=config.get("n_head", 4),
-                n_emb=config.get("n_emb", 256),
-                cond_dim=config.get("emb_dim", 256),
-                dropout=config.get("dropout", 0.1),
-                timestep_embed_dim=config.get("timestep_embed_dim", 128),
-            )
-        else:
-            raise ValueError(f"Unknown network type: {network_type}")
+        flow_def = _create_flow_def(network_type, action_dim, config)
 
         # Initialize encoder first to get actual cond_dim
         rng, enc_rng, crop_init_rng = jax.random.split(rng, 3)
@@ -127,45 +143,8 @@ class BCAgent(flax.struct.PyTreeNode):
         ex_cond = encoder_def.apply(encoder_params, ex_observations)
         actual_cond_dim = ex_cond.shape[-1]
 
-        # Rebuild flow network with actual cond_dim
-        if network_type == "mlp":
-            flow_def = MLP(
-                action_dim=action_dim,
-                emb_dim=config.get("emb_dim", 512),
-                n_blocks=config.get("n_blocks", 6),
-                expansion_factor=config.get("expansion_factor", 4),
-                dropout=config.get("dropout", 0.1),
-                timestep_embed_dim=config.get("timestep_embed_dim", 128),
-                max_freq=config.get("max_freq", 100.0),
-            )
-        elif network_type == "unet":
-            flow_def = ConditionalUnet1D(
-                action_dim=action_dim,
-                down_dims=tuple(config.get("down_dims", (256, 512, 1024))),
-                kernel_size=config.get("kernel_size", 5),
-                n_groups=config.get("n_groups", 8),
-                cond_dim=actual_cond_dim,
-                timestep_embed_dim=config.get("timestep_embed_dim", 256),
-                cond_predict_scale=config.get("cond_predict_scale", False),
-            )
-        elif network_type == "small_mlp":
-            flow_def = SmallMLP(
-                action_dim=action_dim,
-                hidden_dims=tuple(config.get("hidden_dims", (512, 512, 512, 512))),
-                timestep_embed_dim=config.get("timestep_embed_dim", 128),
-                max_freq=config.get("max_freq", 100.0),
-                layer_norm=config.get("layer_norm", True),
-            )
-        elif network_type == "transformer":
-            flow_def = TransformerForFlow(
-                action_dim=action_dim,
-                n_layer=config.get("n_layer", 4),
-                n_head=config.get("n_head", 4),
-                n_emb=config.get("n_emb", 256),
-                cond_dim=actual_cond_dim,
-                dropout=config.get("dropout", 0.1),
-                timestep_embed_dim=config.get("timestep_embed_dim", 128),
-            )
+        # Rebuild flow network with actual cond_dim (matters for unet/transformer)
+        flow_def = _create_flow_def(network_type, action_dim, config, cond_dim=actual_cond_dim)
 
         # Build ModuleDict with example inputs
         batch_size = get_batch_size(ex_observations)
@@ -253,8 +232,8 @@ class BCAgent(flax.struct.PyTreeNode):
         interpolant = Interpolant(config.get("interp_type", "linear"))
         loss_fn_type = get_loss_fn(config.get("flow_type", "flow_matching"))
 
-        # Initialize EMA params as a copy of initial params
-        ema_params = jax.tree_util.tree_map(lambda x: x, network_params)
+        # Initialize EMA params (frozen params are immutable, safe to share)
+        ema_params = network_params
 
         return cls(
             rng=rng,
