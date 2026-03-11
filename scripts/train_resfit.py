@@ -29,7 +29,7 @@ from jax_flow.core.checkpoint import (
     cleanup_old_checkpoints,
 )
 from jax_flow.core.evaluation import evaluate_policy, print_evaluation_results
-from jax_flow.data.replay_buffer import ReplayBuffer
+from jax_flow.data.resfit_replay_buffer import ResFiTReplayBuffer
 from jax_flow.envs import make_robomimic_env
 from jax_flow.envs.residual_wrapper import ResidualEnvWrapper
 
@@ -165,7 +165,7 @@ def fill_offline_buffer(
     buffer_capacity: int,
     n_step: int = 3,
     gamma: float = 0.99,
-) -> ReplayBuffer:
+) -> ResFiTReplayBuffer:
     """Fill offline replay buffer from demo dataset + BC inference.
 
     Iterates through demo episodes, computes BC base_action for each timestep,
@@ -195,19 +195,18 @@ def fill_offline_buffer(
 
     action_dim = dataset.action_dim
 
-    # Determine obs shape for buffer
+    # Determine obs shape for buffer (without base_action)
     sample = dataset[0]
     sample_obs = sample["observations"]
     if isinstance(sample_obs, dict):
         obs_shape = {}
         for key, val in sample_obs.items():
-            obs_shape[key] = val.shape  # (obs_steps, ...) or (obs_steps, H, W, C)
-        obs_shape["base_action"] = (action_dim,)
+            obs_shape[key] = val.shape
     else:
-        obs_shape = {"obs": sample_obs.shape, "base_action": (action_dim,)}
+        obs_shape = {"obs": sample_obs.shape}
 
     # Create buffer
-    buffer = ReplayBuffer(
+    buffer = ResFiTReplayBuffer(
         capacity=buffer_capacity,
         obs_shape=obs_shape,
         action_dim=action_dim,
@@ -235,22 +234,23 @@ def fill_offline_buffer(
         bc_actions = bc_agent.eval_actions(obs_batch)  # (1, horizon, action_dim)
         base_action = np.array(bc_actions[0, 0])  # First step
 
-        # Build obs with base_action
+        # Build obs without base_action
         if isinstance(obs, dict):
-            obs_with_base = {k: np.array(v) for k, v in obs.items()}
-            obs_with_base["base_action"] = base_action
+            obs_clean = {k: np.array(v) for k, v in obs.items()}
         else:
-            obs_with_base = {"obs": np.array(obs), "base_action": base_action}
+            obs_clean = {"obs": np.array(obs)}
 
         # For next_obs, use same obs (single-step dataset doesn't have next)
         # This is approximate — offline buffer is mainly for critic warmup
-        next_obs_with_base = {k: v.copy() for k, v in obs_with_base.items()}
+        next_obs_clean = {k: v.copy() for k, v in obs_clean.items()}
 
         buffer._store_transition(
-            obs=obs_with_base,
+            obs=obs_clean,
             action=np.array(action),
+            base_action=base_action,
+            next_obs=next_obs_clean,
+            next_base_action=base_action.copy(),
             reward=0.0,
-            next_obs=next_obs_with_base,
             done=False,
             discount=gamma,
         )
@@ -261,6 +261,43 @@ def fill_offline_buffer(
 
     print(f"Offline buffer filled: {len(buffer)} transitions")
     return buffer
+
+
+def _split_obs(obs):
+    """Split observation into obs (without base_action) and base_action.
+
+    Args:
+        obs: Observation from ResidualEnvWrapper (dict with base_action key).
+
+    Returns:
+        (obs_clean, base_action): obs without base_action, and base_action array.
+    """
+    if isinstance(obs, dict):
+        base_action = np.array(obs.get("base_action", np.zeros(1)))
+        obs_clean = {k: np.array(v) for k, v in obs.items() if k != "base_action"}
+        return obs_clean, base_action
+    else:
+        return np.array(obs), np.zeros(1)
+
+
+def _to_jax_batch(batch: dict) -> dict:
+    """Convert numpy batch to JAX arrays.
+
+    ResFiTReplayBuffer already returns base_action/next_base_action as independent fields.
+    """
+    jax_batch = {}
+
+    for key in ("obs", "next_obs"):
+        if key in batch and isinstance(batch[key], dict):
+            jax_batch[key] = {k: jnp.array(v) for k, v in batch[key].items()}
+        elif key in batch:
+            jax_batch[key] = jnp.array(batch[key])
+
+    for key in ("action", "base_action", "next_base_action", "reward", "done", "discount"):
+        if key in batch:
+            jax_batch[key] = jnp.array(batch[key])
+
+    return jax_batch
 
 
 @hydra.main(version_base=None, config_path="../configs/resfit", config_name="default")
@@ -361,14 +398,14 @@ def main(cfg: DictConfig):
     )
 
     # 4. Create online replay buffer
-    # Get obs shape from env
+    # Get obs shape from env (obs includes base_action, we need to exclude it)
     obs_sample, _ = train_env.reset()
     if isinstance(obs_sample, dict):
-        obs_shape = {k: np.array(v).shape for k, v in obs_sample.items()}
+        obs_shape = {k: np.array(v).shape for k, v in obs_sample.items() if k != "base_action"}
     else:
         obs_shape = np.array(obs_sample).shape
 
-    online_buffer = ReplayBuffer(
+    online_buffer = ResFiTReplayBuffer(
         capacity=algo.get("buffer_size", 200000),
         obs_shape=obs_shape,
         action_dim=action_dim,
@@ -431,18 +468,21 @@ def main(cfg: DictConfig):
         next_obs, reward, terminated, truncated, info = train_env.step(residual)
         done = terminated or truncated
 
-        # Store combined action
+        # Extract base_action from obs/next_obs, store separately
         combined_action = info.get("combined_action", residual)
+        cur_base_action = info.get("base_action", np.zeros(action_dim, dtype=np.float32))
 
-        # Convert obs to numpy for buffer
-        obs_np = {k: np.array(v) for k, v in obs.items()} if isinstance(obs, dict) else np.array(obs)
-        next_obs_np = {k: np.array(v) for k, v in next_obs.items()} if isinstance(next_obs, dict) else np.array(next_obs)
+        # Split obs: remove base_action for buffer storage
+        obs_np, obs_base = _split_obs(obs)
+        next_obs_np, next_obs_base = _split_obs(next_obs)
 
         online_buffer.add(
             obs=obs_np,
             action=np.array(combined_action),
-            reward=float(reward),
+            base_action=np.array(cur_base_action),
             next_obs=next_obs_np,
+            next_base_action=np.array(next_obs_base),
+            reward=float(reward),
             done=done,
         )
 
@@ -536,16 +576,19 @@ def main(cfg: DictConfig):
         done = terminated or truncated
 
         combined_action = info.get("combined_action", residual)
+        cur_base_action = info.get("base_action", np.zeros(action_dim, dtype=np.float32))
 
-        # Store in online buffer
-        obs_np = {k: np.array(v) for k, v in obs.items()} if isinstance(obs, dict) else np.array(obs)
-        next_obs_np = {k: np.array(v) for k, v in next_obs.items()} if isinstance(next_obs, dict) else np.array(next_obs)
+        # Store in online buffer (split obs: remove base_action)
+        obs_np, _ = _split_obs(obs)
+        next_obs_np, next_base = _split_obs(next_obs)
 
         online_buffer.add(
             obs=obs_np,
             action=np.array(combined_action),
-            reward=float(reward),
+            base_action=np.array(cur_base_action),
             next_obs=next_obs_np,
+            next_base_action=np.array(next_base),
+            reward=float(reward),
             done=done,
         )
 
@@ -667,38 +710,6 @@ def main(cfg: DictConfig):
 
     if wandb_enabled:
         wandb.finish()
-
-
-def _to_jax_batch(batch: dict) -> dict:
-    """Convert numpy batch to JAX arrays.
-
-    Also splits obs into obs (without base_action) and base_action fields.
-    """
-    jax_batch = {}
-
-    for key in ("obs", "next_obs"):
-        if key in batch and isinstance(batch[key], dict):
-            obs_dict = {}
-            for k, v in batch[key].items():
-                if k == "base_action":
-                    continue
-                obs_dict[k] = jnp.array(v)
-            jax_batch[key] = obs_dict
-        elif key in batch:
-            jax_batch[key] = jnp.array(batch[key])
-
-    # Extract base_action and next_base_action
-    if isinstance(batch.get("obs"), dict) and "base_action" in batch["obs"]:
-        jax_batch["base_action"] = jnp.array(batch["obs"]["base_action"])
-    if isinstance(batch.get("next_obs"), dict) and "base_action" in batch["next_obs"]:
-        jax_batch["next_base_action"] = jnp.array(batch["next_obs"]["base_action"])
-
-    # Convert scalar fields
-    for key in ("action", "reward", "done", "discount"):
-        if key in batch:
-            jax_batch[key] = jnp.array(batch[key])
-
-    return jax_batch
 
 
 if __name__ == "__main__":

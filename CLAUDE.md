@@ -164,6 +164,7 @@ pyright jax_flow/
    - `transformer.py`: DiT-style transformer
    - `value.py`: Q-function ensemble (nn.vmap), 支持 RED-Q (num_ensembles=10)
    - `residual_actor.py`: 残差策略网络 + `add_exploration_noise()` 探索噪声
+   - `spatial_emb_actor.py`: SpatialEmbResidualActor — image 模式下 actor 独立 spatial embedding（不依赖 critic trunk）
    - `spatial_emb_critic.py`: SpatialEmbCritic + `redq_q_value` / `ensemble_mean_q` 工具函数
    - `embeddings.py`: Fourier / Learned timestep embeddings
    - `encoders/`: ResNet18Encoder, SpatialSoftmax, MultiImageEncoder, MinViTEncoder, RandomShiftsAug
@@ -174,6 +175,7 @@ pyright jax_flow/
    - `normalizer.py`: MinMax, Image, Identity normalizers
    - `dataset_manager.py`: 自动下载和路径解析，支持 robomimic/mimicgen/dexmimicgen，智能处理 image 数据集
    - `replay_buffer.py`: NumPy 环形 replay buffer, 支持 dict obs + N-step returns + offline 填充
+   - `resfit_replay_buffer.py`: ResFiT 专用 buffer，独立存储 base_action/next_base_action（不塞在 obs dict 里）
 
 6. **Environments** (`jax_flow/envs/`)
    - `robomimic_env.py`: RobomimicWrapper, RobomimicImageWrapper, FrameStackWrapper, ActionChunkingWrapper, DEXMIMICGEN_ENVS 注册表（自动推断双臂 obs/image keys）

@@ -48,6 +48,16 @@ algorithm:
   spatial_emb_dim: 1024
   grad_clip_norm: 1.0
 
+  # Target action noise (TD3 style)
+  target_action_noise: true
+  target_noise_stddev: 0.05
+  target_noise_clip: 0.3
+
+  # Q-target clipping (useful for sparse reward tasks)
+  clip_q_target: false
+  q_target_min: 0.0
+  q_target_max: 1.0
+
   # === Actor ===
   actor_hidden_dim: 1024
   actor_num_layers: 2

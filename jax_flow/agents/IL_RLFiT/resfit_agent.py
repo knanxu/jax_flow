@@ -19,34 +19,12 @@ import optax
 from jax_flow.agents.train_state import TrainState, nonpytree_field
 from jax_flow.networks.encoders import create_encoder
 from jax_flow.networks.residual_actor import ResidualActor, add_exploration_noise
+from jax_flow.networks.spatial_emb_actor import SpatialEmbResidualActor
 from jax_flow.networks.spatial_emb_critic import SpatialEmbCritic, ensemble_mean_q, redq_q_value
 from jax_flow.networks.value import Value
 
 # Re-export for type checking (used in create())
 __all__ = ["ResFiTAgent"]
-
-
-def _get_actor_features_image(patch_features, prop_features, base_action, critic_params, config):
-    """Helper to compute actor features from image observations.
-
-    Extracts spatial embedding from critic trunk.
-    """
-    from jax_flow.networks.spatial_emb_critic import SpatialEmbTrunk
-
-    trunk = SpatialEmbTrunk(spatial_emb_dim=config.get("spatial_emb_dim", 1024))
-    trunk_params = {
-        k: v for k, v in critic_params.items() if k.startswith("SpatialEmbTrunk")
-    }
-    dummy_action = jnp.zeros_like(base_action)
-    z = trunk.apply({"params": trunk_params}, patch_features, dummy_action, prop_features)
-
-    # Extract spatial_emb + prop (remove dummy action)
-    spatial_emb_dim = config.get("spatial_emb_dim", 1024)
-    action_dim = base_action.shape[-1]
-    actor_feat = jnp.concatenate(
-        [z[:, :spatial_emb_dim], z[:, spatial_emb_dim + action_dim :]], axis=-1
-    )
-    return actor_feat
 
 
 def _clip_grads(grads, max_norm: float):
@@ -216,26 +194,34 @@ class ResFiTAgent(flax.struct.PyTreeNode):
         # ============================================================
         # 3. Create Actor
         # ============================================================
-        actor_def = ResidualActor(
-            action_dim=action_dim,
-            hidden_dim=config.get("actor_hidden_dim", 1024),
-            num_layers=config.get("actor_num_layers", 2),
-            action_scale=config.get("action_scale", 0.1),
-            layer_norm=config.get("actor_layer_norm", True),
-        )
-
-        # Actor input: features + base_action
         if obs_type == "image":
-            # For image mode, actor gets flattened spatial embedding + prop + base_action
-            # We'll compute this in the forward pass, but for init we need the size
-            # SpatialEmbTrunk output: (batch, spatial_emb_dim + action_dim + prop_dim)
-            spatial_emb_dim = config.get("spatial_emb_dim", 1024)
-            actor_feat_dim = spatial_emb_dim + prop_dim
+            # Image mode: SpatialEmbResidualActor with independent spatial embedding
+            actor_def = SpatialEmbResidualActor(
+                action_dim=action_dim,
+                spatial_emb_dim=config.get("spatial_emb_dim", 1024),
+                hidden_dim=config.get("actor_hidden_dim", 1024),
+                num_layers=config.get("actor_num_layers", 2),
+                action_scale=config.get("action_scale", 0.1),
+                layer_norm=config.get("actor_layer_norm", True),
+            )
+            ex_patch = jnp.zeros((batch_size, num_patches, embed_dim))
+            ex_prop = jnp.zeros((batch_size, prop_dim))
+            actor_params = actor_def.init(
+                {"params": act_rng}, ex_patch, ex_prop, base_action
+            )["params"]
         else:
-            actor_feat_dim = feat_dim
-
-        ex_actor_feat = jnp.zeros((batch_size, actor_feat_dim))
-        actor_params = actor_def.init({"params": act_rng}, ex_actor_feat, base_action)["params"]
+            # Lowdim mode: standard ResidualActor
+            actor_def = ResidualActor(
+                action_dim=action_dim,
+                hidden_dim=config.get("actor_hidden_dim", 1024),
+                num_layers=config.get("actor_num_layers", 2),
+                action_scale=config.get("action_scale", 0.1),
+                layer_norm=config.get("actor_layer_norm", True),
+            )
+            ex_actor_feat = jnp.zeros((batch_size, feat_dim))
+            actor_params = actor_def.init(
+                {"params": act_rng}, ex_actor_feat, base_action
+            )["params"]
 
         actor_tx = optax.adamw(
             learning_rate=config.get("actor_lr", 1e-6),
@@ -307,26 +293,25 @@ class ResFiTAgent(flax.struct.PyTreeNode):
 
             # 2. Target actor → next residual (no grad)
             if obs_type == "image":
-                next_actor_feat = _get_actor_features_image(
+                next_residual = self.actor_state(
                     next_patch_features, next_prop_features,
                     batch["next_base_action"],
-                    self.target_critic_params, self.config,
+                    params=self.target_actor_params,
                 )
             else:
-                next_actor_feat = next_features
-
-            next_residual = self.actor_state(
-                next_actor_feat,
-                batch["next_base_action"],
-                params=self.target_actor_params,
-            )
-            # Add exploration noise (TD3 style)
-            next_residual = add_exploration_noise(
-                next_residual,
-                noise_rng,
-                stddev=self.config.get("stddev_max", 0.05),
-                clip=self.config.get("stddev_clip", 0.3),
-            )
+                next_residual = self.actor_state(
+                    next_features,
+                    batch["next_base_action"],
+                    params=self.target_actor_params,
+                )
+            # Target action noise (TD3 style, configurable)
+            if self.config.get("target_action_noise", True):
+                next_residual = add_exploration_noise(
+                    next_residual,
+                    noise_rng,
+                    stddev=self.config.get("target_noise_stddev", 0.05),
+                    clip=self.config.get("target_noise_clip", 0.3),
+                )
             next_combined = jnp.clip(
                 batch["next_base_action"] + next_residual, -1.0, 1.0
             )
@@ -351,6 +336,13 @@ class ResFiTAgent(flax.struct.PyTreeNode):
             target_q = batch["reward"].squeeze(-1) + batch["discount"].squeeze(
                 -1
             ) * target_q
+            # Q-target clipping (useful for sparse reward tasks)
+            if self.config.get("clip_q_target", False):
+                target_q = jnp.clip(
+                    target_q,
+                    self.config.get("q_target_min", 0.0),
+                    self.config.get("q_target_max", 1.0),
+                )
             target_q = jax.lax.stop_gradient(target_q)
 
             # 4. Current Q
@@ -424,18 +416,20 @@ class ResFiTAgent(flax.struct.PyTreeNode):
                 patch_features = jax.lax.stop_gradient(patch_features)
                 prop_features = jax.lax.stop_gradient(prop_features)
 
-                actor_feat = _get_actor_features_image(
+                # Actor forward (SpatialEmbResidualActor)
+                residual = self.actor_state(
                     patch_features, prop_features,
-                    batch["base_action"],
-                    self.critic_state.params, self.config,
+                    batch["base_action"], params=actor_params,
                 )
             else:
                 features = self.encoder_state(batch["obs"]["obs"], training=False)
                 features = jax.lax.stop_gradient(features)
-                actor_feat = features
 
-            # Actor forward
-            residual = self.actor_state(actor_feat, batch["base_action"], params=actor_params)
+                # Actor forward (ResidualActor)
+                residual = self.actor_state(
+                    features, batch["base_action"], params=actor_params,
+                )
+
             combined = jnp.clip(batch["base_action"] + residual, -1.0, 1.0)
 
             # Q-value (mean over ensemble)
@@ -496,16 +490,12 @@ class ResFiTAgent(flax.struct.PyTreeNode):
         if obs_type == "image":
             features = self.encoder_state(enc_obs, training=False)
             patch_features, prop_features = features
-            actor_feat = _get_actor_features_image(
-                patch_features, prop_features, base_action,
-                self.critic_state.params, self.config,
-            )
+            # Actor forward (SpatialEmbResidualActor)
+            residual = self.actor_state(patch_features, prop_features, base_action)
         else:
             features = self.encoder_state(enc_obs["obs"], training=False)
-            actor_feat = features
-
-        # Actor forward
-        residual = self.actor_state(actor_feat, base_action)
+            # Actor forward (ResidualActor)
+            residual = self.actor_state(features, base_action)
 
         # Always add noise (stddev=0 means no effect)
         noise = jax.random.normal(rng, residual.shape) * stddev
