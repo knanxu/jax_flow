@@ -199,14 +199,19 @@ class RobomimicImageWrapper(gym.Env):
                     img = img.astype(np.float32)
                 obs[key] = img
 
-        # Lowdim observations
+        # Lowdim observations — keep separate keys to match dataset/encoder
         if self.lowdim_keys:
-            lowdim = np.concatenate(
+            lowdim_concat = np.concatenate(
                 [raw_obs[key] for key in self.lowdim_keys], axis=0
             ).astype(np.float32)
             if self.lowdim_normalizer is not None:
-                lowdim = self.lowdim_normalizer.normalize(lowdim)
-            obs["lowdim"] = lowdim
+                lowdim_concat = self.lowdim_normalizer.normalize(lowdim_concat)
+            # Split back into per-key arrays
+            offset = 0
+            for key in self.lowdim_keys:
+                dim = raw_obs[key].shape[0]
+                obs[key] = lowdim_concat[offset:offset + dim]
+                offset += dim
 
         return obs
 
