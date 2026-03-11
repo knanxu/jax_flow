@@ -194,7 +194,7 @@ def main(cfg: DictConfig):
         "obs_steps": cfg.task.dataset.obs_steps,
         "action_dim": train_dataset.action_dim,
         "obs_dim": train_dataset.obs_dim,
-        "encoder_type": cfg.get("encoder_type", "identity"),
+        "encoder_type": cfg.get("encoder_type", "mlp"),
         "encoder_hidden_dims": tuple(cfg.network.get("encoder_hidden_dims", [256, 256])),
         "emb_dim": cfg.network.emb_dim,
         # MLP residual block params
@@ -203,18 +203,24 @@ def main(cfg: DictConfig):
         "dropout": cfg.network.get("dropout", 0.1),
         "timestep_embed_dim": cfg.network.get("timestep_emb_dim", 128),
         "max_freq": cfg.network.get("max_freq", 100.0),
+        # SmallMLP params
+        "hidden_dims": tuple(cfg.network.get("hidden_dims", [512, 512, 512, 512])),
+        "layer_norm": cfg.network.get("layer_norm", True),
         "network_type": cfg.network.get("network_type", "mlp"),
         "lr": cfg.optimization.lr,
         "weight_decay": cfg.optimization.weight_decay,
         "schedule_type": cfg.optimization.lr_schedule.type,
         "warmup_steps": cfg.optimization.lr_schedule.warmup_steps,
         "gradient_steps": cfg.optimization.gradient_steps,
+        "grad_clip_norm": cfg.optimization.get("grad_clip_norm", 10.0),
         "interp_type": cfg.flow.interp_type,
         "flow_type": cfg.flow.get("policy_type", "flow_matching"),
         "sampler_type": cfg.flow.sampler.type,
         "flow_steps": cfg.flow.sampler.num_steps,
         "sample_mode": cfg.flow.sampler.get("sample_mode", "stochastic"),
         "loss_scale": cfg.flow.loss.get("scale", 0.1),
+        # EMA
+        "ema_decay": cfg.optimization.get("ema_decay", 0.995),
         # MIP t_two_step
         "t_two_step": cfg.flow.get("t_two_step", 0.9),
         # Delta-t schedule for MeanFlow
@@ -413,6 +419,7 @@ def main(cfg: DictConfig):
                 frame_stack=cfg.task.dataset.obs_steps,
                 act_exec_steps=cfg.task.dataset.act_steps,
                 seed=cfg.seed,
+                render_offscreen=cfg.eval.save_video or cfg.eval.render,
             )
 
             # Run evaluation

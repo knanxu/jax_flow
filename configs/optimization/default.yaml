@@ -15,9 +15,9 @@ optimizer_kwargs:
 # Learning rate schedule
 lr_schedule:
   type: cosine
-  warmup_steps: 1000
+  warmup_steps: 0
   total_steps: 300000
-  min_lr: 1e-6
+  min_lr: 0.0
 
 # Training parameters
 batch_size: 1024

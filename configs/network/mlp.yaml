@@ -5,7 +5,7 @@ network_type: mlp
 
 # Architecture parameters (residual block MLP)
 emb_dim: 512
-n_blocks: 6
+n_blocks: 8
 expansion_factor: 4
 dropout: 0.1
 

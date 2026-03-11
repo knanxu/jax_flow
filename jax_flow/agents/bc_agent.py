@@ -17,6 +17,13 @@ from jax_flow.flow.samplers import get_sampler
 logger = logging.getLogger(__name__)
 
 
+def _ema_update(ema_params, new_params, decay):
+    """Update EMA parameters: ema = decay * ema + (1 - decay) * new."""
+    return jax.tree_util.tree_map(
+        lambda e, n: e * decay + n * (1.0 - decay), ema_params, new_params
+    )
+
+
 class BCAgent(flax.struct.PyTreeNode):
     """Behavior Cloning agent using flow matching.
 
@@ -26,6 +33,7 @@ class BCAgent(flax.struct.PyTreeNode):
 
     rng: Any
     network: TrainState
+    ema_params: Any  # EMA copy of network params, used for inference
     config: Any = nonpytree_field()
     interpolant: Any = nonpytree_field()
     loss_fn_type: Any = nonpytree_field()
@@ -46,7 +54,7 @@ class BCAgent(flax.struct.PyTreeNode):
             New BCAgent instance.
         """
         from jax_flow.networks.encoders import create_encoder
-        from jax_flow.networks.mlp import MLP
+        from jax_flow.networks.mlp import MLP, SmallMLP
         from jax_flow.networks.transformer import TransformerForFlow
         from jax_flow.networks.unet import ConditionalUnet1D
 
@@ -90,6 +98,14 @@ class BCAgent(flax.struct.PyTreeNode):
                 timestep_embed_dim=config.get("timestep_embed_dim", 256),
                 cond_predict_scale=config.get("cond_predict_scale", False),
             )
+        elif network_type == "small_mlp":
+            flow_def = SmallMLP(
+                action_dim=action_dim,
+                hidden_dims=tuple(config.get("hidden_dims", (512, 512, 512, 512))),
+                timestep_embed_dim=config.get("timestep_embed_dim", 128),
+                max_freq=config.get("max_freq", 100.0),
+                layer_norm=config.get("layer_norm", True),
+            )
         elif network_type == "transformer":
             flow_def = TransformerForFlow(
                 action_dim=action_dim,
@@ -131,6 +147,14 @@ class BCAgent(flax.struct.PyTreeNode):
                 cond_dim=actual_cond_dim,
                 timestep_embed_dim=config.get("timestep_embed_dim", 256),
                 cond_predict_scale=config.get("cond_predict_scale", False),
+            )
+        elif network_type == "small_mlp":
+            flow_def = SmallMLP(
+                action_dim=action_dim,
+                hidden_dims=tuple(config.get("hidden_dims", (512, 512, 512, 512))),
+                timestep_embed_dim=config.get("timestep_embed_dim", 128),
+                max_freq=config.get("max_freq", 100.0),
+                layer_norm=config.get("layer_norm", True),
             )
         elif network_type == "transformer":
             flow_def = TransformerForFlow(
@@ -187,6 +211,7 @@ class BCAgent(flax.struct.PyTreeNode):
         network_params = flax.core.freeze(network_params)
 
         # Create optimizer (differential LR for image tasks)
+        grad_clip = config.get("grad_clip_norm", 0.0)
         if is_image_task:
             backbone_lr = config.get("backbone_lr", 1e-5)
             encoder_tx = create_optimizer(
@@ -195,6 +220,7 @@ class BCAgent(flax.struct.PyTreeNode):
                 schedule_type=config.get("schedule_type", "constant"),
                 warmup_steps=config.get("warmup_steps", 0),
                 total_steps=config.get("gradient_steps", 100000),
+                grad_clip_norm=grad_clip,
             )
             flow_tx = create_optimizer(
                 lr=config.get("lr", 3e-4),
@@ -202,6 +228,7 @@ class BCAgent(flax.struct.PyTreeNode):
                 schedule_type=config.get("schedule_type", "constant"),
                 warmup_steps=config.get("warmup_steps", 0),
                 total_steps=config.get("gradient_steps", 100000),
+                grad_clip_norm=grad_clip,
             )
             label_fn = make_param_labels(network_params)
             tx = optax.multi_transform(
@@ -214,6 +241,7 @@ class BCAgent(flax.struct.PyTreeNode):
                 schedule_type=config.get("schedule_type", "constant"),
                 warmup_steps=config.get("warmup_steps", 0),
                 total_steps=config.get("gradient_steps", 100000),
+                grad_clip_norm=grad_clip,
             )
 
         extra_vars = {"batch_stats": batch_stats} if batch_stats is not None else None
@@ -225,9 +253,13 @@ class BCAgent(flax.struct.PyTreeNode):
         interpolant = Interpolant(config.get("interp_type", "linear"))
         loss_fn_type = get_loss_fn(config.get("flow_type", "flow_matching"))
 
+        # Initialize EMA params as a copy of initial params
+        ema_params = jax.tree_util.tree_map(lambda x: x, network_params)
+
         return cls(
             rng=rng,
             network=network,
+            ema_params=ema_params,
             config=dict(config),
             interpolant=interpolant,
             loss_fn_type=loss_fn_type,
@@ -284,15 +316,20 @@ class BCAgent(flax.struct.PyTreeNode):
 
         new_network, info = self.network.apply_loss_fn(loss_fn=loss_fn)
 
-        return self.replace(network=new_network, rng=new_rng), info
+        # Update EMA params
+        ema_decay = self.config.get("ema_decay", 0.995)
+        new_ema_params = _ema_update(self.ema_params, new_network.params, ema_decay)
+
+        return self.replace(network=new_network, ema_params=new_ema_params, rng=new_rng), info
 
     @jax.jit
-    def sample_actions(self, observations, rng=None):
+    def sample_actions(self, observations, rng=None, use_ema=True):
         """Sample actions from the flow policy.
 
         Args:
             observations: Observations. Shape: (batch, obs_steps, obs_dim)
             rng: Optional random key. If None, uses agent's rng.
+            use_ema: Whether to use EMA params for inference (default True).
 
         Returns:
             Sampled actions. Shape: (batch, horizon, action_dim)
@@ -303,13 +340,16 @@ class BCAgent(flax.struct.PyTreeNode):
         sampler_type = self.config.get("sampler_type", "euler")
         num_steps = self.config.get("flow_steps", 10)
 
+        # Use EMA params for inference (much-ado / Diffusion Policy pattern)
+        params = self.ema_params if use_ema else None
+
         def encode(obs, training=False, rngs=None):
             if rngs is None:
                 rngs = {}
-            return self.network(obs, training=training, name="encoder", rngs=rngs)
+            return self.network(obs, training=training, name="encoder", params=params, rngs=rngs)
 
         def flow_net(at, s, t, cond, training=False):
-            return self.network(at, s, t, cond, training=training, name="flow")
+            return self.network(at, s, t, cond, training=training, name="flow", params=params)
 
         sampler = get_sampler(sampler_type)
 

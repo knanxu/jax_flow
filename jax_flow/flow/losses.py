@@ -54,8 +54,10 @@ def flow_loss(network, encoder, interpolant, batch, rng, config, step=None):
     # Predict velocity (network now handles horizon dimension internally)
     predicted_velocity = network(x_t, t, t, cond, training=True)
 
-    # Compute loss (with optional per-sample weighting for DQC)
-    per_sample = jnp.mean((predicted_velocity - target_velocity) ** 2, axis=(1, 2))
+    # Compute loss: sum over act_dim, mean over horizon and batch
+    # Matches much-ado: get_norm(sum over dim=-1) then torch.mean(over batch & horizon)
+    per_timestep = jnp.sum((predicted_velocity - target_velocity) ** 2, axis=-1)  # (batch, horizon)
+    per_sample = jnp.mean(per_timestep, axis=-1)  # (batch,)
     if "sample_weights" in batch:
         loss = jnp.mean(batch["sample_weights"] * per_sample)
     else:
@@ -116,9 +118,9 @@ def mip_loss(network, encoder, interpolant, batch, rng, config, step=None):
     st = jnp.full((batch_size,), t_two_step)
     pred_step2 = network(act_t, st, st, cond, training=True)
 
-    # Per-sample L2 norm squared, normalized by time scale
-    per_sample1 = jnp.sum((pred_step1 - actions) ** 2, axis=(1, 2)) / (t_two_step**2)
-    per_sample2 = jnp.sum((pred_step2 - actions) ** 2, axis=(1, 2)) / ((1 - t_two_step) ** 2)
+    # Per-sample: sum over act_dim, mean over horizon, normalized by time scale
+    per_sample1 = jnp.mean(jnp.sum((pred_step1 - actions) ** 2, axis=-1), axis=-1) / (t_two_step**2)
+    per_sample2 = jnp.mean(jnp.sum((pred_step2 - actions) ** 2, axis=-1), axis=-1) / ((1 - t_two_step) ** 2)
 
     if "sample_weights" in batch:
         w = batch["sample_weights"]
@@ -201,6 +203,64 @@ def mf_loss(network, encoder, interpolant, batch, rng, config, step=None):
     1. Independent flow matching loss (learns accurate instantaneous velocity)
     2. MeanFlow self-distillation with delta_t progressive schedule
 
+    =========================================================================
+    Convention differences from the original MeanFlow paper (arXiv 2505.13447)
+    =========================================================================
+
+    Original paper:
+        z_t = (1-t)*z_0 + t*z_1,  z_0 = data, z_1 = noise
+        t=0 is data, t=1 is noise. ODE flows data -> noise.
+        Sampling reverses: start from noise z_1, recover data z_0.
+
+    This implementation:
+        x_s = (1-s)*x_0 + s*x_1,  x_0 = noise, x_1 = data
+        s=0 is noise, s=1 is data. ODE flows noise -> data.
+        Sampling goes forward: start from noise x_0, reach data x_1.
+
+    The paper derives the MeanFlow identity by differentiating w.r.t. t
+    (the noise-end variable). We instead differentiate w.r.t. s (the
+    noise-end variable in our convention), yielding an equivalent identity.
+
+    =========================================================================
+    Mathematical derivation (d/ds version)
+    =========================================================================
+
+    Define the mean velocity over interval [s, t]:
+
+        u(z_s, s, t) = 1/(t-s) * ∫_s^t v(z_τ, τ) dτ
+
+    where v is the instantaneous velocity field and z_τ follows the ODE.
+
+    Differentiate u w.r.t. the lower limit s via Leibniz rule. The total
+    derivative along the characteristic z_s (where dz_s/ds = v(z_s, s))
+    gives:
+
+        d/ds u(z_s, s, t) = (u - v_s) / (t - s)
+
+    Rearranging:
+
+        u(z_s, s, t) = v_s + (t - s) * d/ds u(z_s, s, t)        ... (*)
+
+    This is the self-consistency identity we enforce. The total derivative
+    d/ds u(z_s, s, t) is computed via JVP with tangent (dz_s/ds, ds/ds, dt/ds)
+    = (v_s, 1, 0):
+
+        d/ds u = (∂u/∂z) · v_s + ∂u/∂s
+
+    =========================================================================
+    Sampling (single-step generation)
+    =========================================================================
+
+    At inference, the displacement from s=0 to t=1 is:
+
+        x_1 - x_0 = ∫_0^1 v(z_τ, τ) dτ = (1-0) * u(z_0, 0, 1) = u(x_0, 0, 1)
+
+    Therefore:
+
+        x_1 = x_0 + u_θ(x_0, s=0, t=1, cond)
+
+    where x_0 ~ N(0, I) (stochastic) or x_0 = 0 (deterministic).
+
     Args:
         network: Flow network with signature (at, s, t, cond, training).
         encoder: Observation encoder.
@@ -236,23 +296,26 @@ def mf_loss(network, encoder, interpolant, batch, rng, config, step=None):
     v_target = interpolant.velocity(t_flow, x0, x1)
     v_pred = network(x_t_flow, t_flow, t_flow, cond, training=True)  # s=t
 
-    fm_per_sample = jnp.mean((v_pred - v_target) ** 2, axis=(1, 2))
+    fm_per_sample = jnp.mean(jnp.sum((v_pred - v_target) ** 2, axis=-1), axis=-1)
 
     # === Term 2: MeanFlow self-distillation with delta_t schedule ===
+    # Enforce identity (*): u = v_s + (t - s) * d/ds u
     delta_t = _compute_delta_t(step, config)
 
-    # Time sampling: uniform + delta_t clamp
+    # Sample (s, t) with 0 <= s <= t <= 1, gap clamped by delta_t
     rng, time_rng = jax.random.split(rng)
     temp1, temp2 = jax.random.uniform(time_rng, (2, batch_size), minval=0.0, maxval=1.0)
     s = jnp.minimum(temp1, temp2)
     t = jnp.maximum(temp1, temp2)
     s = jnp.maximum(s, t - delta_t)
 
-    # Construct x_s and v_s from interpolant
+    # x_s = (1-s)*x0 + s*x1,  v_s = dx_s/ds = x1 - x0 (linear case)
     x_s = interpolant.interpolate(s, x0, x1)
     v_s = interpolant.velocity(s, x0, x1)
 
-    # JVP computation
+    # Compute u and its total derivative d/ds u(z_s, s, t) via JVP.
+    # Tangents (v_s, 1, 0) correspond to (dz_s/ds, ds/ds, dt/ds),
+    # giving: duds = (∂u/∂z)·v_s + ∂u/∂s
     def net_fn(x, s_arg, t_arg):
         return network(x, s_arg, t_arg, cond, training=True)
 
@@ -261,11 +324,11 @@ def mf_loss(network, encoder, interpolant, batch, rng, config, step=None):
 
     u, duds = jax.jvp(net_fn, primals, tangents)
 
-    # Target: u_target = v_s + (t - s) * duds
+    # From identity (*): u_target = v_s + (t - s) * duds
     ts_diff = (t - s)[:, None, None]
     u_target = v_s + ts_diff * duds
 
-    # Self-distillation loss
+    # Self-distillation: push u toward sg(u_target)
     error_sq = (u - jax.lax.stop_gradient(u_target)) ** 2
 
     # Adaptive weighting (only on mf_term)
@@ -273,12 +336,12 @@ def mf_loss(network, encoder, interpolant, batch, rng, config, step=None):
     if aw_cfg.get("enabled", False):
         c = aw_cfg.get("c", 0.01)
         p = aw_cfg.get("p", 1.0)
-        per_sample_error = jnp.mean(error_sq, axis=(1, 2))
+        per_sample_error = jnp.mean(jnp.sum(error_sq, axis=-1), axis=-1)
         w = 1.0 / (per_sample_error + c) ** p
         w = jax.lax.stop_gradient(w)
         mf_per_sample = w * per_sample_error
     else:
-        mf_per_sample = jnp.mean(error_sq, axis=(1, 2))
+        mf_per_sample = jnp.mean(jnp.sum(error_sq, axis=-1), axis=-1)
 
     # === Combine with optional sample weights ===
     loss_scale = config.get("loss_scale", 0.1)
@@ -304,13 +367,50 @@ def mf_loss(network, encoder, interpolant, batch, rng, config, step=None):
 def imf_loss(network, encoder, interpolant, batch, rng, config, step=None):
     """Improved MeanFlow loss: flow matching term + v-loss via compound function.
 
-    Key difference from mf_loss: instead of u-loss with network-dependent target,
-    constructs compound function V = u - (t-s)*sg(duds) and regresses to the
-    fixed conditional velocity v_s. This yields a standard regression problem.
+    Combines:
+    1. Independent flow matching loss (learns accurate instantaneous velocity)
+    2. Improved MeanFlow v-loss with delta_t progressive schedule
 
-    Derivation (对 s 求导版本):
-        v_s = u(z_s, s, t) - (t - s) * d/ds u(z_s, s, t)
-        => V := u - (t-s) * stopgrad(duds)  should match v_s
+    =========================================================================
+    Difference from mf_loss
+    =========================================================================
+
+    mf_loss enforces the identity directly as a u-loss:
+
+        L = ||u_θ - sg(u_target)||^2,   u_target = v_s + (t-s) * duds
+
+    The target u_target depends on the network itself (through duds), making
+    it a moving target (self-distillation). This can be unstable.
+
+    imf_loss instead rearranges the identity (*) from mf_loss:
+
+        u = v_s + (t - s) * d/ds u        ... (*)
+
+    into:
+
+        v_s = u - (t - s) * d/ds u        ... (**)
+
+    and constructs a compound function:
+
+        V := u_θ - (t - s) * sg(d/ds u_θ)
+
+    which is regressed to the fixed, known conditional velocity v_s:
+
+        L = ||V - v_s||^2
+
+    This converts the self-distillation problem into a standard regression
+    with a network-independent target, improving training stability.
+
+    =========================================================================
+    JVP tangent choice: learned velocity vs ground truth
+    =========================================================================
+
+    The total derivative d/ds u(z_s, s, t) requires dz_s/ds as the tangent
+    for the z-component. In mf_loss, this is the ground-truth interpolant
+    velocity v_s = x_1 - x_0. Here we use the network's own prediction
+    v̂_s = u_θ(z_s, s, s) instead, since at convergence u_θ(·, s, s) = v(·, s).
+    This avoids requiring access to the ground-truth conditional velocity
+    in the JVP tangent.
 
     Args:
         network: Flow network with signature (at, s, t, cond, training).
@@ -347,37 +447,42 @@ def imf_loss(network, encoder, interpolant, batch, rng, config, step=None):
     v_target = interpolant.velocity(t_flow, x0, x1)
     v_pred = network(x_t_flow, t_flow, t_flow, cond, training=True)  # s=t
 
-    fm_per_sample = jnp.mean((v_pred - v_target) ** 2, axis=(1, 2))
+    fm_per_sample = jnp.mean(jnp.sum((v_pred - v_target) ** 2, axis=-1), axis=-1)
 
     # === Term 2: Improved MeanFlow v-loss with delta_t schedule ===
+    # Enforce identity (**): v_s = u - (t - s) * d/ds u
     delta_t = _compute_delta_t(step, config)
 
-    # Time sampling: uniform + delta_t clamp
+    # Sample (s, t) with 0 <= s <= t <= 1, gap clamped by delta_t
     rng, time_rng = jax.random.split(rng)
     temp1, temp2 = jax.random.uniform(time_rng, (2, batch_size), minval=0.0, maxval=1.0)
     s = jnp.minimum(temp1, temp2)
     t = jnp.maximum(temp1, temp2)
     s = jnp.maximum(s, t - delta_t)
 
-    # Construct x_s and v_s from interpolant
+    # x_s = (1-s)*x0 + s*x1,  v_s_true = x1 - x0 (ground-truth conditional velocity)
     x_s = interpolant.interpolate(s, x0, x1)
     v_s_true = interpolant.velocity(s, x0, x1)
-    # JVP computation: d/ds u(x_s, s, t) with tangents (v_s, 1, 0)
+
     def net_fn(x, s_arg, t_arg):
         return network(x, s_arg, t_arg, cond, training=True)
 
+    # v̂_s = u_θ(z_s, s, s): network's estimate of instantaneous velocity,
+    # used as the z-tangent instead of ground-truth v_s (see docstring)
     v_s = net_fn(x_s, s, s)
+
+    # Compute u and d/ds u via JVP with tangent (v̂_s, 1, 0)
     primals = (x_s, s, t)
     tangents = (v_s, jnp.ones((batch_size,)), jnp.zeros((batch_size,)))
 
     u, duds = jax.jvp(net_fn, primals, tangents)
 
-    # Compound function V: recover instantaneous velocity from mean velocity
-    # v_s = u - (t - s) * duds  =>  V = u - (t-s) * sg(duds)
+    # Compound function V from identity (**): V = u - (t-s) * sg(duds)
+    # At convergence V = v_s, so regress V to the known v_s_true
     ts_diff = (t - s)[:, None, None]
     V = u - ts_diff * jax.lax.stop_gradient(duds)
 
-    # v-loss: regress V to fixed conditional velocity v_s
+    # v-loss: regress V to fixed conditional velocity v_s_true
     error_sq = (V - v_s_true) ** 2
 
     # Adaptive weighting (only on imf_term)
@@ -385,12 +490,12 @@ def imf_loss(network, encoder, interpolant, batch, rng, config, step=None):
     if aw_cfg.get("enabled", False):
         c = aw_cfg.get("c", 0.01)
         p = aw_cfg.get("p", 1.0)
-        per_sample_error = jnp.mean(error_sq, axis=(1, 2))
+        per_sample_error = jnp.mean(jnp.sum(error_sq, axis=-1), axis=-1)
         w = 1.0 / (per_sample_error + c) ** p
         w = jax.lax.stop_gradient(w)
         imf_per_sample = w * per_sample_error
     else:
-        imf_per_sample = jnp.mean(error_sq, axis=(1, 2))
+        imf_per_sample = jnp.mean(jnp.sum(error_sq, axis=-1), axis=-1)
 
     # === Combine with optional sample weights ===
     loss_scale = config.get("loss_scale", 0.1)

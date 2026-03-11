@@ -80,8 +80,9 @@ def create_optimizer(
     schedule_type: str = "constant",
     warmup_steps: int = 0,
     total_steps: int = 100000,
+    grad_clip_norm: float = 0.0,
 ) -> optax.GradientTransformation:
-    """Create optimizer with optional learning rate schedule.
+    """Create optimizer with optional learning rate schedule and gradient clipping.
 
     Args:
         lr: Base learning rate.
@@ -89,6 +90,7 @@ def create_optimizer(
         schedule_type: Learning rate schedule type ('constant', 'linear', 'cosine').
         warmup_steps: Number of warmup steps.
         total_steps: Total training steps.
+        grad_clip_norm: Max gradient norm for clipping. 0 = no clipping.
 
     Returns:
         Optax optimizer.
@@ -104,11 +106,18 @@ def create_optimizer(
     else:
         lr_schedule = lr
 
-    # Create optimizer
+    # Build optimizer chain
+    chain = []
+    if grad_clip_norm > 0.0:
+        chain.append(optax.clip_by_global_norm(grad_clip_norm))
     if weight_decay > 0.0:
-        return optax.adamw(learning_rate=lr_schedule, weight_decay=weight_decay)
+        chain.append(optax.adamw(learning_rate=lr_schedule, weight_decay=weight_decay))
     else:
-        return optax.adam(learning_rate=lr_schedule)
+        chain.append(optax.adam(learning_rate=lr_schedule))
+
+    if len(chain) == 1:
+        return chain[0]
+    return optax.chain(*chain)
 
 
 def get_batch_size(obs):

@@ -10,7 +10,7 @@ interp_type: linear  # linear or trigonometric
 sampler:
   type: euler
   num_steps: 10      # Number of ODE integration steps
-  sample_mode: stochastic  # stochastic (gaussian) or zero
+  sample_mode: zero         # zero (deterministic) or stochastic (gaussian)
   deterministic: true
   adaptive_step: false
 

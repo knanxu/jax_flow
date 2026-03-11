@@ -9,7 +9,7 @@ obs_type: lowdim
 dataset:
   path: data/robomimic/square/ph/low_dim_v15.hdf5
   dataset_type: ph     # ph (proficient-human), mh (multi-human), mg (machine-generated)
-  horizon: 16          # Action prediction horizon
+  horizon: 10          # Action prediction horizon (much-ado default for square)
   obs_steps: 2         # Observation history length
   act_steps: 8         # Action execution steps
 

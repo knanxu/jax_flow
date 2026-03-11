@@ -1,6 +1,6 @@
 """Neural network architectures."""
 
-from jax_flow.networks.mlp import MLP
+from jax_flow.networks.mlp import MLP, SmallMLP
 from jax_flow.networks.residual_actor import ResidualActor, add_exploration_noise
 from jax_flow.networks.spatial_emb_critic import (
     SpatialEmbCritic,
@@ -13,6 +13,7 @@ from jax_flow.networks.value import Value
 
 __all__ = [
     "MLP",
+    "SmallMLP",
     "ConditionalUnet1D",
     "SpatialEmbCritic",
     "TransformerForFlow",

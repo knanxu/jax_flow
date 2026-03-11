@@ -111,6 +111,51 @@ class MLP(nn.Module):
         return velocity
 
 
+class SmallMLP(nn.Module):
+    """Lightweight MLP for flow matching, following qc/ACFQL pattern.
+
+    Simple stacked Dense layers with GELU activation — no residual blocks,
+    no expansion factor, no dropout. Much faster for testing and small tasks.
+
+    Network signature: (at, s, t, obs) -> velocity
+    """
+
+    action_dim: int
+    hidden_dims: tuple[int, ...] = (512, 512, 512, 512)
+    timestep_embed_dim: int = 128
+    max_freq: float = 100.0
+    layer_norm: bool = True
+
+    @nn.compact
+    def __call__(self, at, s, t, obs, training=False):
+        batch_size, horizon, action_dim = at.shape
+
+        # Embed timesteps
+        s_emb = FourierEmbedding(
+            embed_dim=self.timestep_embed_dim, max_freq=self.max_freq, name="s_embed"
+        )(s)
+        t_emb = FourierEmbedding(
+            embed_dim=self.timestep_embed_dim, max_freq=self.max_freq, name="t_embed"
+        )(t)
+
+        # Flatten and concatenate all inputs
+        at_flat = at.reshape(batch_size, -1)
+        h = jnp.concatenate([at_flat, s_emb, t_emb, obs], axis=-1)
+
+        # Stacked Dense + GELU (qc pattern)
+        for i, dim in enumerate(self.hidden_dims):
+            h = nn.Dense(dim, name=f"fc_{i}")(h)
+            h = nn.gelu(h)
+            if self.layer_norm:
+                h = nn.LayerNorm(name=f"ln_{i}")(h)
+
+        # Output projection (no activation)
+        output_dim = horizon * action_dim
+        velocity_flat = nn.Dense(output_dim, name="output_proj")(h)
+
+        return velocity_flat.reshape(batch_size, horizon, action_dim)
+
+
 def create_mlp(
     action_dim,
     emb_dim=512,

@@ -34,6 +34,7 @@ def save_checkpoint(
         "step": agent.network.step,
         "config": agent.config,
         "rng": agent.rng,
+        "ema_params": agent.ema_params,
         "training_step": step,
     }
 
@@ -97,14 +98,18 @@ def restore_agent(checkpoint_path: Union[str, Path], agent_class: Any, ex_observ
     )
 
     # Restore network state
-    agent = agent.replace(
-        rng=checkpoint["rng"],
-        network=agent.network.replace(
+    restored_fields = {
+        "rng": checkpoint["rng"],
+        "network": agent.network.replace(
             params=checkpoint["params"],
             opt_state=checkpoint["opt_state"],
             step=checkpoint["step"],
         ),
-    )
+    }
+    # Restore EMA params if available, otherwise fall back to params
+    restored_fields["ema_params"] = checkpoint.get("ema_params", checkpoint["params"])
+
+    agent = agent.replace(**restored_fields)
 
     return agent, checkpoint
 

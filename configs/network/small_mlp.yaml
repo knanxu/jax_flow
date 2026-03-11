@@ -1,0 +1,16 @@
+# Small MLP network configuration (qc/ACFQL pattern)
+# Simple stacked Dense + GELU, no residual blocks
+
+name: small_mlp
+network_type: small_mlp
+
+# Encoder output dim (shared with other network types)
+emb_dim: 256
+
+# Architecture parameters
+hidden_dims: [512, 512, 512, 512]
+layer_norm: false
+
+# Time embedding (uniform frequency Fourier)
+timestep_emb_dim: 128
+max_freq: 100.0
