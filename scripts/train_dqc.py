@@ -166,6 +166,9 @@ def main(cfg: DictConfig):
         "t_two_step": cfg.flow.get("t_two_step", 0.9),
         "delta_t_schedule": dict(cfg.flow.get("delta_t_schedule", {})),
         "adaptive_weight": dict(cfg.flow.get("adaptive_weight", {})),
+        # MeanFlow Stable parameters
+        "time_steps": cfg.flow.get("time_steps", 0),
+        "consistency_alpha": cfg.flow.get("consistency_alpha", 0.0),
         # Optimizer
         "lr": cfg.optimization.lr,
         "weight_decay": cfg.optimization.weight_decay,

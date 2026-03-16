@@ -24,10 +24,10 @@ from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
 from jax_flow.agents.bc_agent import BCAgent
-from jax_flow.data import make_robomimic_dataset, DatasetManager
-from jax_flow.core.checkpoint import save_checkpoint, cleanup_old_checkpoints
+from jax_flow.core.checkpoint import cleanup_old_checkpoints, save_checkpoint
 from jax_flow.core.evaluation import evaluate_policy, print_evaluation_results
-from jax_flow.envs import make_robomimic_env
+from jax_flow.data import DatasetManager, make_dataset, make_robomimic_dataset
+from jax_flow.envs import make_env, make_robomimic_env
 
 
 def create_dataloader(dataset, batch_size, shuffle=True):
@@ -39,7 +39,7 @@ def create_dataloader(dataset, batch_size, shuffle=True):
             np.random.shuffle(indices)
 
         for i in range(0, len(indices), batch_size):
-            batch_indices = indices[i:i + batch_size]
+            batch_indices = indices[i : i + batch_size]
 
             # Collect batch
             obs_batch = []
@@ -53,8 +53,7 @@ def create_dataloader(dataset, batch_size, shuffle=True):
             first_obs = obs_batch[0]
             if isinstance(first_obs, dict):
                 observations = {
-                    k: jnp.array(np.stack([o[k] for o in obs_batch]))
-                    for k in first_obs
+                    k: jnp.array(np.stack([o[k] for o in obs_batch])) for k in first_obs
                 }
             else:
                 observations = jnp.array(np.stack(obs_batch))
@@ -71,7 +70,6 @@ def create_dataloader(dataset, batch_size, shuffle=True):
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig):
     """Main training function."""
-
     # Print config
     print("=" * 80)
     print("Training Configuration")
@@ -93,6 +91,9 @@ def main(cfg: DictConfig):
     print("Loading Dataset")
     print("=" * 80)
 
+    # Determine task source
+    task_source = cfg.task.get("task_source", "robomimic")
+
     # Ensure dataset exists (auto-download if missing)
     dataset_path = cfg.task.dataset.path
     task_name = cfg.task.get("dataset_name", cfg.task.env_name.lower())
@@ -104,7 +105,7 @@ def main(cfg: DictConfig):
         task=task_name,
         dataset_type=dataset_type,
         obs_type=obs_type,
-        source="robomimic",
+        source=task_source,
         auto_download=True,
     )
 
@@ -121,9 +122,16 @@ def main(cfg: DictConfig):
     dataset_kwargs = {}
     if is_image:
         image_keys = list(cfg.task.dataset.get("image_keys", ["agentview_image"]))
-        lowdim_keys = list(cfg.task.dataset.get("lowdim_keys", [
-            "robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos",
-        ]))
+        lowdim_keys = list(
+            cfg.task.dataset.get(
+                "lowdim_keys",
+                [
+                    "robot0_eef_pos",
+                    "robot0_eef_quat",
+                    "robot0_gripper_qpos",
+                ],
+            )
+        )
         dataset_kwargs["image_keys"] = tuple(image_keys)
         dataset_kwargs["lowdim_keys"] = tuple(lowdim_keys)
     else:
@@ -131,27 +139,44 @@ def main(cfg: DictConfig):
         if "obs_keys" in cfg.task:
             dataset_kwargs["obs_keys"] = tuple(cfg.task.obs_keys)
 
-    train_dataset = make_robomimic_dataset(
-        dataset_path=dataset_path,
-        horizon=cfg.task.dataset.horizon,
-        obs_steps=cfg.task.dataset.obs_steps,
-        act_steps=cfg.task.dataset.act_steps,
-        obs_type=cfg.task.obs_type,
-        val_ratio=0.1,
-        mode="train",
-        **dataset_kwargs,
-    )
+    # Create datasets via dispatch
+    common_kwargs = {
+        "horizon": cfg.task.dataset.horizon,
+        "obs_steps": cfg.task.dataset.obs_steps,
+        "act_steps": cfg.task.dataset.act_steps,
+        "val_ratio": 0.1,
+    }
 
-    val_dataset = make_robomimic_dataset(
-        dataset_path=dataset_path,
-        horizon=cfg.task.dataset.horizon,
-        obs_steps=cfg.task.dataset.obs_steps,
-        act_steps=cfg.task.dataset.act_steps,
-        obs_type=cfg.task.obs_type,
-        val_ratio=0.1,
-        mode="val",
-        **dataset_kwargs,
-    )
+    if task_source in ("pusht", "kitchen"):
+        train_dataset = make_dataset(
+            task_source=task_source,
+            dataset_path=dataset_path,
+            obs_type=obs_type,
+            mode="train",
+            **common_kwargs,
+        )
+        val_dataset = make_dataset(
+            task_source=task_source,
+            dataset_path=dataset_path,
+            obs_type=obs_type,
+            mode="val",
+            **common_kwargs,
+        )
+    else:
+        train_dataset = make_robomimic_dataset(
+            dataset_path=dataset_path,
+            obs_type=cfg.task.obs_type,
+            mode="train",
+            **common_kwargs,
+            **dataset_kwargs,
+        )
+        val_dataset = make_robomimic_dataset(
+            dataset_path=dataset_path,
+            obs_type=cfg.task.obs_type,
+            mode="val",
+            **common_kwargs,
+            **dataset_kwargs,
+        )
 
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Val dataset size: {len(val_dataset)}")
@@ -195,7 +220,9 @@ def main(cfg: DictConfig):
         "action_dim": train_dataset.action_dim,
         "obs_dim": train_dataset.obs_dim,
         "encoder_type": cfg.get("encoder_type", "mlp"),
-        "encoder_hidden_dims": tuple(cfg.network.get("encoder_hidden_dims", [256, 256])),
+        "encoder_hidden_dims": tuple(
+            cfg.network.get("encoder_hidden_dims", [256, 256])
+        ),
         "emb_dim": cfg.network.emb_dim,
         # MLP residual block params
         "n_blocks": cfg.network.get("n_blocks", 6),
@@ -213,6 +240,8 @@ def main(cfg: DictConfig):
         "warmup_steps": cfg.optimization.lr_schedule.warmup_steps,
         "gradient_steps": cfg.optimization.gradient_steps,
         "grad_clip_norm": cfg.optimization.get("grad_clip_norm", 10.0),
+        "b1": cfg.optimization.optimizer_kwargs.get("b1", 0.95),
+        "b2": cfg.optimization.optimizer_kwargs.get("b2", 0.999),
         "interp_type": cfg.flow.interp_type,
         "flow_type": cfg.flow.get("policy_type", "flow_matching"),
         "sampler_type": cfg.flow.sampler.type,
@@ -227,6 +256,9 @@ def main(cfg: DictConfig):
         "delta_t_schedule": dict(cfg.flow.get("delta_t_schedule", {})),
         # Adaptive weighting for MeanFlow
         "adaptive_weight": dict(cfg.flow.get("adaptive_weight", {})),
+        # MeanFlow Stable parameters
+        "time_steps": cfg.flow.get("time_steps", 0),
+        "consistency_alpha": cfg.flow.get("consistency_alpha", 0.0),
         # Store task info for evaluation
         "dataset_path": str(resolved_path),
         "env_name": cfg.task.env_name,
@@ -243,9 +275,12 @@ def main(cfg: DictConfig):
             agent_config["crop_shape"] = tuple(crop_shape)
     else:
         # Store obs_keys for lowdim mode
-        agent_config["obs_keys"] = tuple(cfg.task.get("obs_keys", [
-            "robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"
-        ]))
+        agent_config["obs_keys"] = tuple(
+            cfg.task.get(
+                "obs_keys",
+                ["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"],
+            )
+        )
 
     rng, agent_rng = jax.random.split(rng)
     agent = BCAgent.create(
@@ -262,6 +297,7 @@ def main(cfg: DictConfig):
     if cfg.wandb.enabled:
         try:
             import wandb
+
             wandb.init(
                 project=cfg.wandb.project,
                 entity=cfg.wandb.entity,
@@ -311,21 +347,30 @@ def main(cfg: DictConfig):
         train_losses.append(float(info["loss"]))
 
         if step % cfg.optimization.log_freq == 0:
-            avg_loss = np.mean(train_losses[-cfg.optimization.log_freq:])
-            pbar.set_postfix({
-                "loss": f"{avg_loss:.4f}",
-                "grad_norm": f"{float(info['grad/norm']):.4f}",
-            })
+            avg_loss = np.mean(train_losses[-cfg.optimization.log_freq :])
+            pbar.set_postfix(
+                {
+                    "loss": f"{avg_loss:.4f}",
+                    "grad_norm": f"{float(info['grad/norm']):.4f}",
+                }
+            )
 
             # Log to W&B
             if cfg.wandb.enabled:
-                wandb.log({
-                    "train/loss": avg_loss,
-                    "train/grad_norm": float(info["grad/norm"]),
-                    "train/step": step,
-                    "train/lr": float(info.get("lr", cfg.optimization.lr)),
-                    **{f"train/{k}": float(info[k]) for k in ("flow_matching_loss", "mf_term", "delta_t") if k in info},
-                }, step=step)
+                wandb.log(
+                    {
+                        "train/loss": avg_loss,
+                        "train/grad_norm": float(info["grad/norm"]),
+                        "train/step": step,
+                        "train/lr": float(info.get("lr", cfg.optimization.lr)),
+                        **{
+                            f"train/{k}": float(info[k])
+                            for k in ("flow_matching_loss", "mf_term", "delta_t")
+                            if k in info
+                        },
+                    },
+                    step=step,
+                )
 
         # Validation
         if step % cfg.optimization.eval_freq == 0 and step > 0:
@@ -357,10 +402,25 @@ def main(cfg: DictConfig):
                     def encode(obs, training=False, rngs=None):
                         if rngs is None:
                             rngs = val_rngs
-                        return agent.network(obs, training=training, name="encoder", params=params, rngs=rngs)
+                        return agent.network(
+                            obs,
+                            training=training,
+                            name="encoder",
+                            params=params,
+                            rngs=rngs,
+                        )
 
                     def flow_net(at, s, t, cond, training=False):
-                        return agent.network(at, s, t, cond, training=training, name="flow", params=params, rngs=val_rngs)
+                        return agent.network(
+                            at,
+                            s,
+                            t,
+                            cond,
+                            training=training,
+                            name="flow",
+                            params=params,
+                            rngs=val_rngs,
+                        )
 
                     return agent.loss_fn_type(
                         network=flow_net,
@@ -380,9 +440,12 @@ def main(cfg: DictConfig):
 
             # Log to W&B
             if cfg.wandb.enabled:
-                wandb.log({
-                    "val/loss": avg_val_loss,
-                }, step=step)
+                wandb.log(
+                    {
+                        "val/loss": avg_val_loss,
+                    },
+                    step=step,
+                )
 
             # Save best model
             if avg_val_loss < best_val_loss:
@@ -403,24 +466,46 @@ def main(cfg: DictConfig):
             eval_count += 1
 
             # Create evaluation environment
-            eval_env = make_robomimic_env(
-                env_name=cfg.task.env_name,
-                dataset_path=resolved_path,
-                obs_type=cfg.task.obs_type,
-                obs_keys=tuple(cfg.task.dataset.get("obs_keys", [
-                    "robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"
-                ])),
-                image_keys=tuple(image_keys) if is_image else None,
-                lowdim_keys=tuple(lowdim_keys) if is_image else None,
-                obs_normalizer=normalizers.get("obs"),
-                action_normalizer=normalizers["action"],
-                lowdim_normalizer=normalizers.get("lowdim"),
-                max_episode_steps=cfg.task.env.max_episode_steps,
-                frame_stack=cfg.task.dataset.obs_steps,
-                act_exec_steps=cfg.task.dataset.act_steps,
-                seed=cfg.seed,
-                render_offscreen=cfg.eval.save_video or cfg.eval.render,
-            )
+            if task_source in ("pusht", "kitchen"):
+                eval_env = make_env(
+                    task_source=task_source,
+                    obs_type=obs_type if task_source == "pusht" else None,
+                    env_name=cfg.task.env_name if task_source == "kitchen" else None,
+                    obs_normalizer=normalizers.get("obs"),
+                    action_normalizer=normalizers["action"],
+                    lowdim_normalizer=normalizers.get("lowdim"),
+                    max_episode_steps=cfg.task.env.max_episode_steps,
+                    frame_stack=cfg.task.dataset.obs_steps,
+                    act_exec_steps=cfg.task.dataset.act_steps,
+                    seed=cfg.seed,
+                )
+            else:
+                eval_env = make_robomimic_env(
+                    env_name=cfg.task.env_name,
+                    dataset_path=resolved_path,
+                    obs_type=cfg.task.obs_type,
+                    obs_keys=tuple(
+                        cfg.task.dataset.get(
+                            "obs_keys",
+                            [
+                                "robot0_eef_pos",
+                                "robot0_eef_quat",
+                                "robot0_gripper_qpos",
+                                "object",
+                            ],
+                        )
+                    ),
+                    image_keys=tuple(image_keys) if is_image else None,
+                    lowdim_keys=tuple(lowdim_keys) if is_image else None,
+                    obs_normalizer=normalizers.get("obs"),
+                    action_normalizer=normalizers["action"],
+                    lowdim_normalizer=normalizers.get("lowdim"),
+                    max_episode_steps=cfg.task.env.max_episode_steps,
+                    frame_stack=cfg.task.dataset.obs_steps,
+                    act_exec_steps=cfg.task.dataset.act_steps,
+                    seed=cfg.seed,
+                    render_offscreen=cfg.eval.save_video or cfg.eval.render,
+                )
 
             # Run evaluation
             eval_results = evaluate_policy(
@@ -451,17 +536,37 @@ def main(cfg: DictConfig):
                     eval_log["eval/action_mean"] = eval_results["action_mean"]
                     eval_log["eval/action_std"] = eval_results["action_std"]
                     eval_log["eval/action_abs_mean"] = eval_results["action_abs_mean"]
-                    eval_log["eval/action_clip_ratio"] = eval_results["action_clip_ratio"]
+                    eval_log["eval/action_clip_ratio"] = eval_results[
+                        "action_clip_ratio"
+                    ]
+                # Kitchen p1-p7 metrics
+                for k in range(1, 8):
+                    pk = f"p{k}"
+                    if pk in eval_results:
+                        eval_log[f"eval/{pk}"] = eval_results[pk]
                 wandb.log(eval_log, step=step)
 
                 # Upload videos
-                if cfg.wandb.log_videos and "videos" in eval_results and eval_count % cfg.wandb.log_video_interval == 0:
+                if (
+                    cfg.wandb.log_videos
+                    and "videos" in eval_results
+                    and eval_count % cfg.wandb.log_video_interval == 0
+                ):
                     for i, video_frames in enumerate(eval_results["videos"]):
                         # video_frames: (T, H, W, C) in uint8
-                        video_frames_transposed = np.transpose(video_frames, (0, 3, 1, 2))  # (T, C, H, W)
-                        wandb.log({
-                            f"eval/video_{i}": wandb.Video(video_frames_transposed, fps=cfg.eval.video_fps, format="mp4")
-                        }, step=step)
+                        video_frames_transposed = np.transpose(
+                            video_frames, (0, 3, 1, 2)
+                        )  # (T, C, H, W)
+                        wandb.log(
+                            {
+                                f"eval/video_{i}": wandb.Video(
+                                    video_frames_transposed,
+                                    fps=cfg.eval.video_fps,
+                                    format="mp4",
+                                )
+                            },
+                            step=step,
+                        )
 
         # Save checkpoint
         if step % cfg.checkpoint.save_freq == 0 and step > 0:
@@ -472,12 +577,16 @@ def main(cfg: DictConfig):
                 agent=agent,
                 step=step,
                 normalizers=normalizers,
-                best_val_loss=float(best_val_loss) if best_val_loss != float("inf") else None,
+                best_val_loss=float(best_val_loss)
+                if best_val_loss != float("inf")
+                else None,
             )
 
             # Cleanup old checkpoints
             if cfg.checkpoint.keep_last_n > 0:
-                cleanup_old_checkpoints(output_dir, keep_last_n=cfg.checkpoint.keep_last_n)
+                cleanup_old_checkpoints(
+                    output_dir, keep_last_n=cfg.checkpoint.keep_last_n
+                )
 
     print("\n" + "=" * 80)
     print("Training Complete!")
