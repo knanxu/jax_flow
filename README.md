@@ -69,10 +69,12 @@ python scripts/download_data.py --task square --obs_type lowdim
 
 ```bash
 # Step 1: 下载 demo 文件（包含 states 轨迹，用于渲染图像）
+# 必须指定 --download_dir ~/.robomimic，否则 robomimic 默认下载到 site-packages/datasets/ 下
 python -m robomimic.scripts.download_datasets \
     --tasks square \
     --dataset_types ph \
-    --hdf5_types raw
+    --hdf5_types raw \
+    --download_dir ~/.robomimic
 
 # Step 2: 从 demo 文件渲染生成 image 数据集
 python scripts/generate_image_dataset.py --task square --dataset_type ph
