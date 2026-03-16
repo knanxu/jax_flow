@@ -6,10 +6,9 @@ from typing import Any
 import flax
 import jax
 import jax.numpy as jnp
-import optax
 
 from jax_flow.agents.train_state import ModuleDict, TrainState, nonpytree_field
-from jax_flow.core.utils import create_optimizer, get_batch_size, make_param_labels
+from jax_flow.core.utils import create_optimizer, get_batch_size
 from jax_flow.flow.interpolant import Interpolant
 from jax_flow.flow.losses import get_loss_fn
 from jax_flow.flow.samplers import get_sampler
@@ -61,12 +60,13 @@ def _create_flow_def(network_type, action_dim, config, cond_dim=None):
     elif network_type == "unet":
         return ConditionalUnet1D(
             action_dim=action_dim,
-            down_dims=tuple(config.get("down_dims", (256, 512, 1024))),
+            cond_dim=cond_dim or config.get("emb_dim", 256),
+            model_dim=config.get("model_dim", 256),
+            emb_dim=config.get("emb_dim", 256),
             kernel_size=config.get("kernel_size", 5),
             n_groups=config.get("n_groups", 8),
-            cond_dim=cond_dim or config.get("emb_dim", 256),
-            timestep_embed_dim=config.get("timestep_embed_dim", 256),
-            cond_predict_scale=config.get("cond_predict_scale", False),
+            cond_predict_scale=config.get("cond_predict_scale", True),
+            dim_mult=tuple(config.get("dim_mult", (1, 2, 2))),
         )
     elif network_type == "transformer":
         return TransformerForFlow(
@@ -144,7 +144,9 @@ class BCAgent(flax.struct.PyTreeNode):
         actual_cond_dim = ex_cond.shape[-1]
 
         # Rebuild flow network with actual cond_dim (matters for unet/transformer)
-        flow_def = _create_flow_def(network_type, action_dim, config, cond_dim=actual_cond_dim)
+        flow_def = _create_flow_def(
+            network_type, action_dim, config, cond_dim=actual_cond_dim
+        )
 
         # Build ModuleDict with example inputs
         batch_size = get_batch_size(ex_observations)
@@ -172,56 +174,20 @@ class BCAgent(flax.struct.PyTreeNode):
             else None
         )
 
-        # Load ImageNet pretrained weights for image tasks
-        is_image_task = config.get("encoder_type") == "multi_image"
-        if is_image_task and batch_stats is not None:
-            from jax_flow.networks.encoders.pretrained_weights import (
-                load_pretrained_resnet18,
-            )
-
-            enc_key = "modules_encoder"
-            encoder_params, encoder_bs = load_pretrained_resnet18(
-                network_params[enc_key], batch_stats[enc_key]
-            )
-            network_params[enc_key] = encoder_params
-            batch_stats[enc_key] = encoder_bs
-            logger.info("Loaded ImageNet pretrained ResNet18 weights")
-
         network_params = flax.core.freeze(network_params)
 
-        # Create optimizer (differential LR for image tasks)
+        # Create optimizer (unified LR for all params, matching Diffusion Policy)
         grad_clip = config.get("grad_clip_norm", 0.0)
-        if is_image_task:
-            backbone_lr = config.get("backbone_lr", 1e-5)
-            encoder_tx = create_optimizer(
-                lr=backbone_lr,
-                weight_decay=config.get("weight_decay", 0.0),
-                schedule_type=config.get("schedule_type", "constant"),
-                warmup_steps=config.get("warmup_steps", 0),
-                total_steps=config.get("gradient_steps", 100000),
-                grad_clip_norm=grad_clip,
-            )
-            flow_tx = create_optimizer(
-                lr=config.get("lr", 3e-4),
-                weight_decay=config.get("weight_decay", 0.0),
-                schedule_type=config.get("schedule_type", "constant"),
-                warmup_steps=config.get("warmup_steps", 0),
-                total_steps=config.get("gradient_steps", 100000),
-                grad_clip_norm=grad_clip,
-            )
-            label_fn = make_param_labels(network_params)
-            tx = optax.multi_transform(
-                {"encoder": encoder_tx, "flow": flow_tx}, label_fn
-            )
-        else:
-            tx = create_optimizer(
-                lr=config.get("lr", 3e-4),
-                weight_decay=config.get("weight_decay", 0.0),
-                schedule_type=config.get("schedule_type", "constant"),
-                warmup_steps=config.get("warmup_steps", 0),
-                total_steps=config.get("gradient_steps", 100000),
-                grad_clip_norm=grad_clip,
-            )
+        tx = create_optimizer(
+            lr=config.get("lr", 3e-4),
+            weight_decay=config.get("weight_decay", 0.0),
+            schedule_type=config.get("schedule_type", "constant"),
+            warmup_steps=config.get("warmup_steps", 0),
+            total_steps=config.get("gradient_steps", 100000),
+            grad_clip_norm=grad_clip,
+            b1=config.get("b1", 0.95),
+            b2=config.get("b2", 0.999),
+        )
 
         extra_vars = {"batch_stats": batch_stats} if batch_stats is not None else None
         network = TrainState.create(
@@ -299,7 +265,9 @@ class BCAgent(flax.struct.PyTreeNode):
         ema_decay = self.config.get("ema_decay", 0.995)
         new_ema_params = _ema_update(self.ema_params, new_network.params, ema_decay)
 
-        return self.replace(network=new_network, ema_params=new_ema_params, rng=new_rng), info
+        return self.replace(
+            network=new_network, ema_params=new_ema_params, rng=new_rng
+        ), info
 
     @jax.jit
     def sample_actions(self, observations, rng=None, use_ema=True):
@@ -325,10 +293,14 @@ class BCAgent(flax.struct.PyTreeNode):
         def encode(obs, training=False, rngs=None):
             if rngs is None:
                 rngs = {}
-            return self.network(obs, training=training, name="encoder", params=params, rngs=rngs)
+            return self.network(
+                obs, training=training, name="encoder", params=params, rngs=rngs
+            )
 
         def flow_net(at, s, t, cond, training=False):
-            return self.network(at, s, t, cond, training=training, name="flow", params=params)
+            return self.network(
+                at, s, t, cond, training=training, name="flow", params=params
+            )
 
         sampler = get_sampler(sampler_type)
 

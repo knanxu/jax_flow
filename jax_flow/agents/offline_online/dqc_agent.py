@@ -115,12 +115,13 @@ class DQCAgent(flax.struct.PyTreeNode):
         elif network_type == "unet":
             actor_def = ConditionalUnet1D(
                 action_dim=action_dim,
-                down_dims=tuple(config.get("down_dims", (256, 512, 1024))),
+                cond_dim=actual_cond_dim,
+                model_dim=config.get("model_dim", 256),
+                emb_dim=config.get("emb_dim", 256),
                 kernel_size=config.get("kernel_size", 5),
                 n_groups=config.get("n_groups", 8),
-                cond_dim=actual_cond_dim,
-                timestep_embed_dim=config.get("timestep_embed_dim", 256),
-                cond_predict_scale=config.get("cond_predict_scale", False),
+                cond_predict_scale=config.get("cond_predict_scale", True),
+                dim_mult=tuple(config.get("dim_mult", (1, 2, 2))),
             )
         elif network_type == "transformer":
             actor_def = TransformerForFlow(

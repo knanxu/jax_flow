@@ -16,7 +16,7 @@ Build a high-quality, reusable JAX codebase for robotics research with:
 1. **Standard JAX code**: Pure functional programming, immutable state, JIT-friendly
 2. **Rich flow policies**: Flow matching, MeanFlow, MIP from much-ado-about-noising
 3. **Multiple networks**: MLP (priority), UNet, Transformer (DiT)
-4. **Full environment support**: Robomimic MimicGen DexMimicGen (lowdim + image)
+4. **Full environment support**: Robomimic MimicGen DexMimicGen Push-T Kitchen (lowdim + image)
 5. **Clean config management**: Hydra + OmegaConf (YAML configs)
 6. **Offline-to-online RL**: ACFQL and DQC algorithms from qc/dqc projects
 7. **Extensibility**: Standard agent design (jaxrl_m, qc patterns)
@@ -28,6 +28,8 @@ Build a high-quality, reusable JAX codebase for robotics research with:
 pip install -e .
 pip install -e .[dev]
 pip install -e .[robomimic]
+pip install -e .[pusht]
+pip install -e .[kitchen]
 ```
 
 ### Data Download
@@ -69,6 +71,14 @@ python scripts/train_acfql.py --config-name acfql_default task=square_lowdim alg
 # DQC: decoupled Q-chunking (offline)
 python scripts/train_dqc.py --config-name dqc_default task=square_lowdim
 python scripts/train_dqc.py --config-name dqc_default task=square_lowdim algorithm.backup_horizon=25 algorithm.policy_chunk_size=5
+
+# Push-T: state/keypoint/image observations
+python scripts/train_bc.py task=pusht_state
+python scripts/train_bc.py task=pusht_keypoint
+python scripts/train_bc.py task=pusht_image
+
+# Kitchen: state observations with p1-p7 metrics
+python scripts/train_bc.py task=kitchen_state
 ```
 
 ### Evaluation
@@ -116,9 +126,13 @@ python scripts/convert_dexmimicgen.py --all
 - **Robomimic**: lift, can, square, transport, tool_hang（lowdim 可直接下载，image 需从 demo 生成）
 - **MimicGen**: stack, stack_three, threading, coffee, kitchen, hammer_cleanup, mug_cleanup, pick_place, nut_assembly（HuggingFace 下载 `{task}_d0.hdf5` 后用 `convert_mimicgen.py` 转换）
 - **DexMimicGen**: two_arm_threading, two_arm_three_piece_assembly, two_arm_transport（Panda 双臂任务，HuggingFace `MimicGen/dexmimicgen_datasets` 下载后用 `convert_dexmimicgen.py` 转换，存储于 `~/.dexmimicgen/datasets/`）
+- **Push-T**: pusht（zarr 格式，HuggingFace `ChaoyiPan/mip-dataset` 自动下载，支持 state/keypoint/image）
+- **Kitchen**: kitchen（MJL 二进制日志，HuggingFace `ChaoyiPan/mip-dataset` 自动下载，60D obs + 9D action）
 
 数据集路径优先级：绝对路径 > 项目相对路径 > ~/.dexmimicgen/datasets/ > ~/.robomimic/mimicgen/core/ > ~/.robomimic/ > 自动下载
-DatasetManager 会自动根据 task 名判断数据源（MIMICGEN_TASKS / DEXMIMICGEN_TASKS 集合中的任务自动走对应路径）
+DatasetManager 会自动根据 task 名判断数据源（MIMICGEN_TASKS / DEXMIMICGEN_TASKS / PUSHT_TASKS / KITCHEN_TASKS 集合中的任务自动走对应路径）
+
+**任务分发机制**: task YAML 中 `task_source` 字段（robomimic/pusht/kitchen）控制数据集和环境的创建路由。`make_dataset()` 和 `make_env()` 分发函数根据 `task_source` 路由到对应后端。
 
 ### Testing
 ```bash
@@ -144,10 +158,10 @@ pyright jax_flow/
    - Custom `flax.struct.PyTreeNode` with `apply_loss_fn` (qc pattern)
    - ModuleDict: 单个 TrainState 管理多个网络（encoder, flow, critic 等）
    - `select(name)` helper for module access
-   - `extra_variables`: 存储 batch_stats 等非 params 变量（FrozenBatchNorm 用），lowdim 任务为 None
+   - `extra_variables`: 存储 batch_stats 等非 params 变量，lowdim 任务为 None
 
 2. **Agents** (`jax_flow/agents/`)
-   - `BCAgent`: Flow matching BC, immutable PyTreeNode。图像任务自动加载 ImageNet 预训练 ResNet18 + 差异学习率（backbone_lr vs lr）
+   - `BCAgent`: Flow matching BC, immutable PyTreeNode。图像任务使用 GroupNorm ResNet18（从头训练，统一 LR，对齐 Diffusion Policy）
    - `ResFiTAgent`: Residual RL fine-tuning (TD3 + RED-Q + 残差动作), 3 独立 TrainState
    - `ACFQLAgent`: Offline-to-online RL (待完善)
    - Pattern: `create()` → `update(batch)` → `sample_actions(obs)`
@@ -160,25 +174,29 @@ pyright jax_flow/
 
 4. **Networks** (`jax_flow/networks/`)
    - `mlp.py`: MLP，`@nn.compact`，输入 `(at, s, t, obs)` 输出 `velocity`
-   - `unet.py`: 1D UNet for sequence modeling
+   - `unet.py`: 1D UNet (对齐 ChiUNet from much-ado-about-noising)，dim_mult 控制通道倍增，GELU 激活，FiLM conditioning
    - `transformer.py`: DiT-style transformer
    - `value.py`: Q-function ensemble (nn.vmap), 支持 RED-Q (num_ensembles=10)
    - `residual_actor.py`: 残差策略网络 + `add_exploration_noise()` 探索噪声
    - `spatial_emb_actor.py`: SpatialEmbResidualActor — image 模式下 actor 独立 spatial embedding（不依赖 critic trunk）
    - `spatial_emb_critic.py`: SpatialEmbCritic + `redq_q_value` / `ensemble_mean_q` 工具函数
    - `embeddings.py`: Fourier / Learned timestep embeddings
-   - `encoders/`: ResNet18Encoder, SpatialSoftmax, MultiImageEncoder, MinViTEncoder, RandomShiftsAug
+   - `encoders/`: ResNet18Encoder (GroupNorm, 完整 layer1-4), SpatialSoftmax, MultiImageEncoder, MinViTEncoder, RandomShiftsAug
 
 5. **Data** (`jax_flow/data/`)
    - `robomimic_dataset.py`: Lowdim HDF5 dataset, per-episode 存储 + 全局索引
    - `robomimic_image_dataset.py`: Image HDF5 dataset, 支持多相机 + lowdim 混合
+   - `pusht_dataset.py`: Push-T zarr 数据集，支持 state/keypoint/image 三种 obs type，HuggingFace 自动下载
+   - `kitchen_dataset.py`: Kitchen MJL 二进制日志数据集，60D obs + 9D action，HuggingFace 自动下载
    - `normalizer.py`: MinMax, Image, Identity normalizers
-   - `dataset_manager.py`: 自动下载和路径解析，支持 robomimic/mimicgen/dexmimicgen，智能处理 image 数据集
+   - `dataset_manager.py`: 自动下载和路径解析，支持 robomimic/mimicgen/dexmimicgen/pusht/kitchen，智能处理 image 数据集
    - `replay_buffer.py`: NumPy 环形 replay buffer, 支持 dict obs + N-step returns + offline 填充
    - `resfit_replay_buffer.py`: ResFiT 专用 buffer，独立存储 base_action/next_base_action（不塞在 obs dict 里）
 
 6. **Environments** (`jax_flow/envs/`)
    - `robomimic_env.py`: RobomimicWrapper, RobomimicImageWrapper, FrameStackWrapper, ActionChunkingWrapper, DEXMIMICGEN_ENVS 注册表（自动推断双臂 obs/image keys）
+   - `pusht/`: Push-T 环境（pymunk 物理引擎），支持 state(5D)/keypoint(20D)/image obs，PushTWrapper 归一化 + success 判定
+   - `kitchen/`: Kitchen 环境（MuJoCo Franka），thirdparty/ 包含完整 adept_envs，KitchenWrapper 桥接 old gym → Gymnasium + p1-p7 指标
    - `residual_wrapper.py`: ResidualEnvWrapper — 内嵌冻结 BC 策略，管理 action queue，RL agent 只输出单步残差
 
 7. **Configuration** (`configs/`)
@@ -187,8 +205,9 @@ pyright jax_flow/
 
 8. **Checkpoint & Evaluation** (`jax_flow/core/`)
    - `checkpoint.py`: save/load checkpoint (pickle format), 包含 params + opt_state + config + normalizers
-   - `evaluation.py`: rollout_episode, evaluate_policy (success rate + videos)
+   - `evaluation.py`: rollout_episode, evaluate_policy (success rate + videos + Kitchen p1-p7 指标)
    - 训练时自动保存 best model + 定期 checkpoint，支持 W&B 视频上传
+   - Kitchen p1-p7: 完成 ≥k 个子任务的 episode 比例（k=1..7），用于评估多任务完成度
 
 ### Training Pipeline for BC
 

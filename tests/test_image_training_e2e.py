@@ -189,10 +189,11 @@ def test_different_network_types():
         },
         "unet": {
             "network_type": "unet",
-            "down_dims": (128, 256),
+            "model_dim": 64,
+            "emb_dim": 64,
+            "dim_mult": (1, 2),
             "kernel_size": 5,
             "n_groups": 8,
-            "timestep_embed_dim": 64,
         },
         "transformer": {
             "network_type": "transformer",

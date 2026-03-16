@@ -1,9 +1,9 @@
 """1D UNet building blocks for action sequence prediction.
 
-Components for ConditionalUnet1D following Diffusion Policy's architecture:
-- Conv1dBlock: Conv1d → GroupNorm → Mish
+Components for ConditionalUnet1D following ChiUNet (much-ado-about-noising):
+- Conv1dBlock: Conv1d → GroupNorm → GELU
 - Downsample1d / Upsample1d: Strided convolutions for resolution changes
-- ConditionalResidualBlock1D: FiLM-conditioned residual block
+- ConditionalResidualBlock1D: FiLM-conditioned residual block with GELU
 """
 
 import flax.linen as nn
@@ -11,10 +11,9 @@ import jax.numpy as jnp
 
 
 class Conv1dBlock(nn.Module):
-    """Conv1d → GroupNorm → Mish activation.
+    """Conv1d → GroupNorm → GELU activation.
 
     Operates on (batch, channels, horizon) layout.
-    Uses flax Conv with feature_group_count for grouped normalization.
     """
 
     out_channels: int
@@ -38,16 +37,10 @@ class Conv1dBlock(nn.Module):
             kernel_size=(self.kernel_size,),
             padding="SAME",
         )(x)
+        x = nn.GroupNorm(num_groups=self.n_groups)(x)
+        x = nn.gelu(x)
         # Transpose back to (batch, channels, horizon)
         x = jnp.transpose(x, (0, 2, 1))
-
-        # GroupNorm operates on (batch, ..., channels), transpose for it
-        x = jnp.transpose(x, (0, 2, 1))  # (batch, horizon, channels)
-        x = nn.GroupNorm(num_groups=self.n_groups)(x)
-        x = jnp.transpose(x, (0, 2, 1))  # (batch, channels, horizon)
-
-        # Mish activation: x * tanh(softplus(x))
-        x = x * jnp.tanh(nn.softplus(x))
         return x
 
 
@@ -114,6 +107,9 @@ class ConditionalResidualBlock1D(nn.Module):
     is injected via FiLM (Feature-wise Linear Modulation) between
     the two conv blocks.
 
+    Matches ChiResidualBlock: GELU activation in cond_encoder,
+    GELU in Conv1dBlock.
+
     FiLM: out = scale * out + bias (when cond_predict_scale=True)
           out = out + bias          (when cond_predict_scale=False)
     """
@@ -142,8 +138,8 @@ class ConditionalResidualBlock1D(nn.Module):
             name="conv1",
         )(x)
 
-        # FiLM conditioning (Diffusion Policy: Mish -> Linear -> reshape)
-        cond_act = cond * jnp.tanh(nn.softplus(cond))  # Mish activation on cond
+        # FiLM conditioning (ChiUNet: GELU -> Linear -> reshape)
+        cond_act = nn.gelu(cond)
         if self.cond_predict_scale:
             cond_channels = self.out_channels * 2
             cond_params = nn.Dense(cond_channels, name="cond_dense")(cond_act)

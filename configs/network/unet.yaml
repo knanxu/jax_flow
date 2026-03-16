@@ -1,19 +1,14 @@
-# UNet1D network configuration
+# UNet1D network configuration (aligned with ChiUNet from much-ado-about-noising)
 
 name: unet
 network_type: unet
 
 # Architecture parameters
-down_dims: [256, 512, 1024]
+model_dim: 256
+emb_dim: 256
+dim_mult: [1, 2, 2]
 kernel_size: 5
 n_groups: 8
-emb_dim: 256
-
-# Time embedding
-timestep_embed_dim: 128
 
 # FiLM conditioning
-cond_predict_scale: true  # Predict both scale and bias for FiLM
-
-# Activation function (Mish is hardcoded in Conv1dBlock)
-# No need to specify activation here
+cond_predict_scale: true
