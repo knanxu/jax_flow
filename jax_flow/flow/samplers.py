@@ -120,11 +120,54 @@ def mip_sampler(network, encoder, observations, num_steps, rng, config):
     return act_pred_1
 
 
+def meanflow_sampler_stable(network, encoder, observations, num_steps, rng, config):
+    """MeanFlow single-step sampler.
+
+    The MeanFlow network g_θ(x_s, s, t) directly predicts data (x_1).
+    At inference: actions = g_θ(x_0, s=0, t=1, cond).
+
+    Supports two initialization modes:
+    - "zero": deterministic, x_0 = 0
+    - "stochastic": x_0 ~ N(0, I)
+
+    Args:
+        network: Flow network.
+        encoder: Observation encoder.
+        observations: Observations.
+        num_steps: Unused (always single-step).
+        rng: Random key.
+        config: Configuration dict.
+
+    Returns:
+        Sampled actions. Shape: (batch, horizon, action_dim)
+    """
+    batch_size = get_batch_size(observations)
+    horizon = config.get("horizon", 10)
+    action_dim = config.get("action_dim", 7)
+    sample_mode = config.get("sample_mode", "stochastic")
+
+    cond = encoder(observations, training=False, rngs={})
+
+    if sample_mode == "zero":
+        x0 = jnp.zeros((batch_size, horizon, action_dim))
+    else:
+        x0 = jax.random.normal(rng, (batch_size, horizon, action_dim))
+
+    s = jnp.zeros((batch_size,))
+    t = jnp.ones((batch_size,))
+
+    actions = network(x0, s, t, cond, training=False)
+    return actions
+
 def meanflow_sampler(network, encoder, observations, num_steps, rng, config):
     """MeanFlow single-step sampler.
 
-    Generates actions in one network evaluation:
-        actions = x0 + u_theta(x0, s=0, t=1, cond)
+    The MeanFlow network g_θ(x_s, s, t) directly predicts data (x_1).
+    At inference: actions = g_θ(x_0, s=0, t=1, cond).
+
+    Supports two initialization modes:
+    - "zero": deterministic, x_0 = 0
+    - "stochastic": x_0 ~ N(0, I)
 
     Args:
         network: Flow network.
@@ -154,6 +197,8 @@ def meanflow_sampler(network, encoder, observations, num_steps, rng, config):
 
     actions = x0 + network(x0, s, t, cond, training=False)
     return actions
+# meanflow_stable uses the same single-step sampling as meanflow
+
 
 
 def get_sampler(sampler_type="euler"):
@@ -166,5 +211,7 @@ def get_sampler(sampler_type="euler"):
         return mip_sampler
     elif sampler_type == "meanflow":
         return meanflow_sampler
+    elif sampler_type == "meanflow_stable":
+        return meanflow_sampler_stable
     else:
         raise ValueError(f"Unknown sampler type: {sampler_type}")

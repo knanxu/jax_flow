@@ -1,20 +1,23 @@
 """PyTorch → JAX/Flax weight conversion for ImageNet-pretrained ResNet18.
 
 Downloads torchvision ResNet18 weights and maps them to the Flax ResNet18Encoder
-(which stops at layer3/256ch, no layer4/512ch).
+(full layer1-4, GroupNorm). Only conv kernels and GroupNorm scale/bias are loaded;
+PyTorch BN running_mean/var are discarded since we use GroupNorm.
 
 PyTorch → Flax naming:
     conv1.weight              → Conv_0/kernel
-    bn1.*                     → FrozenBatchNorm_0/*
-    layer1.0.conv1/bn1        → ResidualBlock_0/Conv_0, FrozenBatchNorm_0
-    layer1.0.conv2/bn2        → ResidualBlock_0/Conv_1, FrozenBatchNorm_1
+    bn1.weight/bias           → GroupNorm_0/scale, bias
+    layer1.0.conv1/bn1        → ResidualBlock_0/Conv_0, GroupNorm_0
+    layer1.0.conv2/bn2        → ResidualBlock_0/Conv_1, GroupNorm_1
     layer1.1.*                → ResidualBlock_1/*
-    layer2.0.conv1/bn1        → ResidualBlock_2/Conv_0, FrozenBatchNorm_0
-    layer2.0.conv2/bn2        → ResidualBlock_2/Conv_1, FrozenBatchNorm_1
-    layer2.0.downsample.0/1   → ResidualBlock_2/Conv_2, FrozenBatchNorm_2
+    layer2.0.conv1/bn1        → ResidualBlock_2/Conv_0, GroupNorm_0
+    layer2.0.conv2/bn2        → ResidualBlock_2/Conv_1, GroupNorm_1
+    layer2.0.downsample.0/1   → ResidualBlock_2/Conv_2, GroupNorm_2
     layer2.1.*                → ResidualBlock_3/*
     layer3.0.*                → ResidualBlock_4/* (with downsample)
     layer3.1.*                → ResidualBlock_5/*
+    layer4.0.*                → ResidualBlock_6/* (with downsample)
+    layer4.1.*                → ResidualBlock_7/*
 """
 
 import logging
@@ -50,22 +53,25 @@ _LAYER_BLOCK_MAP = {
     (2, 1): 3,
     (3, 0): 4,
     (3, 1): 5,
+    (4, 0): 6,
+    (4, 1): 7,
 }
 
 
-def _load_weights_into_single_resnet(params, batch_stats, pt_weights):
-    """Load pretrained weights into a single ResNet18Encoder's params and batch_stats.
+def _load_weights_into_single_resnet(params, pt_weights):
+    """Load pretrained weights into a single ResNet18Encoder's params.
+
+    Only loads conv kernels and GroupNorm scale/bias. PyTorch BN running stats
+    are discarded since we use GroupNorm instead of BatchNorm.
 
     Args:
         params: Flax params dict for one ResNet18Encoder.
-        batch_stats: Flax batch_stats dict for one ResNet18Encoder.
         pt_weights: Dict of numpy arrays from PyTorch state_dict.
 
     Returns:
-        (new_params, new_batch_stats) with pretrained values filled in.
+        new_params with pretrained conv/norm values filled in.
     """
     params = jax.tree.map(lambda x: x, params)  # shallow copy
-    batch_stats = jax.tree.map(lambda x: x, batch_stats)
 
     def _set(d, path, value):
         """Set a nested dict value by path list."""
@@ -77,17 +83,15 @@ def _load_weights_into_single_resnet(params, batch_stats, pt_weights):
     _set(
         params, ["Conv_0", "kernel"], _conv_kernel_pt_to_jax(pt_weights["conv1.weight"])
     )
-    _set(params, ["FrozenBatchNorm_0", "scale"], pt_weights["bn1.weight"])
-    _set(params, ["FrozenBatchNorm_0", "bias"], pt_weights["bn1.bias"])
-    _set(batch_stats, ["FrozenBatchNorm_0", "mean"], pt_weights["bn1.running_mean"])
-    _set(batch_stats, ["FrozenBatchNorm_0", "var"], pt_weights["bn1.running_var"])
+    _set(params, ["GroupNorm_0", "scale"], pt_weights["bn1.weight"])
+    _set(params, ["GroupNorm_0", "bias"], pt_weights["bn1.bias"])
 
-    # --- Residual blocks (layer1-3 only, skip layer4) ---
+    # --- Residual blocks (layer1-4) ---
     for (layer_idx, block_idx), flax_block_idx in _LAYER_BLOCK_MAP.items():
         prefix = f"layer{layer_idx}.{block_idx}"
         block_name = f"ResidualBlock_{flax_block_idx}"
 
-        # conv1 → Conv_0, bn1 → FrozenBatchNorm_0
+        # conv1 → Conv_0, bn1 → GroupNorm_0
         _set(
             params,
             [block_name, "Conv_0", "kernel"],
@@ -95,26 +99,16 @@ def _load_weights_into_single_resnet(params, batch_stats, pt_weights):
         )
         _set(
             params,
-            [block_name, "FrozenBatchNorm_0", "scale"],
+            [block_name, "GroupNorm_0", "scale"],
             pt_weights[f"{prefix}.bn1.weight"],
         )
         _set(
             params,
-            [block_name, "FrozenBatchNorm_0", "bias"],
+            [block_name, "GroupNorm_0", "bias"],
             pt_weights[f"{prefix}.bn1.bias"],
         )
-        _set(
-            batch_stats,
-            [block_name, "FrozenBatchNorm_0", "mean"],
-            pt_weights[f"{prefix}.bn1.running_mean"],
-        )
-        _set(
-            batch_stats,
-            [block_name, "FrozenBatchNorm_0", "var"],
-            pt_weights[f"{prefix}.bn1.running_var"],
-        )
 
-        # conv2 → Conv_1, bn2 → FrozenBatchNorm_1
+        # conv2 → Conv_1, bn2 → GroupNorm_1
         _set(
             params,
             [block_name, "Conv_1", "kernel"],
@@ -122,26 +116,16 @@ def _load_weights_into_single_resnet(params, batch_stats, pt_weights):
         )
         _set(
             params,
-            [block_name, "FrozenBatchNorm_1", "scale"],
+            [block_name, "GroupNorm_1", "scale"],
             pt_weights[f"{prefix}.bn2.weight"],
         )
         _set(
             params,
-            [block_name, "FrozenBatchNorm_1", "bias"],
+            [block_name, "GroupNorm_1", "bias"],
             pt_weights[f"{prefix}.bn2.bias"],
         )
-        _set(
-            batch_stats,
-            [block_name, "FrozenBatchNorm_1", "mean"],
-            pt_weights[f"{prefix}.bn2.running_mean"],
-        )
-        _set(
-            batch_stats,
-            [block_name, "FrozenBatchNorm_1", "var"],
-            pt_weights[f"{prefix}.bn2.running_var"],
-        )
 
-        # Downsample (only for first block of layer2 and layer3)
+        # Downsample (first block of layer2, layer3, layer4)
         ds_key = f"{prefix}.downsample.0.weight"
         if ds_key in pt_weights:
             _set(
@@ -152,29 +136,19 @@ def _load_weights_into_single_resnet(params, batch_stats, pt_weights):
             ds_bn_prefix = f"{prefix}.downsample.1"
             _set(
                 params,
-                [block_name, "FrozenBatchNorm_2", "scale"],
+                [block_name, "GroupNorm_2", "scale"],
                 pt_weights[f"{ds_bn_prefix}.weight"],
             )
             _set(
                 params,
-                [block_name, "FrozenBatchNorm_2", "bias"],
+                [block_name, "GroupNorm_2", "bias"],
                 pt_weights[f"{ds_bn_prefix}.bias"],
             )
-            _set(
-                batch_stats,
-                [block_name, "FrozenBatchNorm_2", "mean"],
-                pt_weights[f"{ds_bn_prefix}.running_mean"],
-            )
-            _set(
-                batch_stats,
-                [block_name, "FrozenBatchNorm_2", "var"],
-                pt_weights[f"{ds_bn_prefix}.running_var"],
-            )
 
-    return params, batch_stats
+    return params
 
 
-def load_pretrained_resnet18(encoder_params, encoder_batch_stats):
+def load_pretrained_resnet18(encoder_params):
     """Load ImageNet-pretrained ResNet18 weights into encoder params.
 
     Handles both single ResNet18Encoder and MultiImageEncoder (which may
@@ -184,17 +158,15 @@ def load_pretrained_resnet18(encoder_params, encoder_batch_stats):
 
     Args:
         encoder_params: Flax params dict for the encoder.
-        encoder_batch_stats: Flax batch_stats dict for the encoder.
 
     Returns:
-        (new_encoder_params, new_encoder_batch_stats)
+        new_encoder_params with pretrained conv/norm weights.
     """
     pt_weights = _download_pytorch_weights()
     logger.info("Downloaded ImageNet-pretrained ResNet18 weights")
 
     # Make mutable copies
     encoder_params = jax.tree.map(lambda x: np.array(x), encoder_params)
-    encoder_batch_stats = jax.tree.map(lambda x: np.array(x), encoder_batch_stats)
 
     # Detect structure: MultiImageEncoder has image_encoder_{i} keys,
     # or a shared encoder with ResidualBlock_* at top level
@@ -203,17 +175,13 @@ def load_pretrained_resnet18(encoder_params, encoder_batch_stats):
         # Multiple separate ResNet18 instances
         for key in resnet_keys:
             logger.info("Loading pretrained weights into %s", key)
-            new_p, new_bs = _load_weights_into_single_resnet(
-                encoder_params[key], encoder_batch_stats[key], pt_weights
+            encoder_params[key] = _load_weights_into_single_resnet(
+                encoder_params[key], pt_weights
             )
-            encoder_params[key] = new_p
-            encoder_batch_stats[key] = new_bs
     elif "ResidualBlock_0" in encoder_params:
         # Single ResNet18Encoder (shared or standalone)
         logger.info("Loading pretrained weights into single ResNet18Encoder")
-        encoder_params, encoder_batch_stats = _load_weights_into_single_resnet(
-            encoder_params, encoder_batch_stats, pt_weights
-        )
+        encoder_params = _load_weights_into_single_resnet(encoder_params, pt_weights)
     else:
         # MultiImageEncoder with shared encoder — ResNet is under the auto-named
         # ResNet18Encoder_0 key
@@ -221,15 +189,13 @@ def load_pretrained_resnet18(encoder_params, encoder_batch_stats):
         if shared_keys:
             for key in shared_keys:
                 logger.info("Loading pretrained weights into %s", key)
-                new_p, new_bs = _load_weights_into_single_resnet(
-                    encoder_params[key], encoder_batch_stats[key], pt_weights
+                encoder_params[key] = _load_weights_into_single_resnet(
+                    encoder_params[key], pt_weights
                 )
-                encoder_params[key] = new_p
-                encoder_batch_stats[key] = new_bs
         else:
             logger.warning(
                 "Could not find ResNet18 parameters in encoder. Keys: %s",
                 list(encoder_params.keys()),
             )
 
-    return encoder_params, encoder_batch_stats
+    return encoder_params

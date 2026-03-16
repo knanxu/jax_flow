@@ -9,7 +9,7 @@ obs_type: image
 dataset:
   path: data/robomimic/square/ph/image_v141.hdf5
   dataset_type: ph
-  horizon: 10
+  horizon: 16          # Action prediction horizon (must be power of 2 for UNet)
   obs_steps: 2
   act_steps: 8
 

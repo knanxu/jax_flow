@@ -1,7 +1,8 @@
 """Evaluation utilities for policy rollout."""
 
+from typing import Any
+
 import numpy as np
-from typing import Any, Dict
 
 
 def rollout_episode(
@@ -10,13 +11,14 @@ def rollout_episode(
     max_steps: int = 500,
     render: bool = False,
     save_video: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Rollout a single episode."""
     obs, info = env.reset()
     done = False
     episode_length = 0
     episode_return = 0.0
     success = False
+    result_num_completed = 0
     frames = [] if save_video else None
     action_list = []
 
@@ -45,6 +47,12 @@ def rollout_episode(
         if "success" in info:
             success = bool(info["success"])
 
+        # Track Kitchen completed tasks (highest seen during episode)
+        if "num_completed" in info:
+            num_completed = int(info["num_completed"])
+            if num_completed > result_num_completed:
+                result_num_completed = num_completed
+
         if save_video:
             frame = env.render()
             frames.append(frame)
@@ -57,6 +65,9 @@ def rollout_episode(
         "return": episode_return,
         "success": success,
     }
+
+    if result_num_completed > 0:
+        result["num_completed"] = result_num_completed
 
     if action_list:
         all_actions = np.concatenate(action_list, axis=0)
@@ -80,11 +91,12 @@ def evaluate_policy(
     save_video: bool = False,
     num_videos: int = 3,
     verbose: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Evaluate policy over multiple episodes."""
     episode_lengths = []
     episode_returns = []
     successes = []
+    num_completed_list = []
     videos = []
     action_means = []
     action_stds = []
@@ -105,6 +117,9 @@ def evaluate_policy(
         episode_lengths.append(result["length"])
         episode_returns.append(result["return"])
         successes.append(result["success"])
+
+        if "num_completed" in result:
+            num_completed_list.append(result["num_completed"])
 
         if "action_mean" in result:
             action_means.append(result["action_mean"])
@@ -143,10 +158,16 @@ def evaluate_policy(
     if videos:
         results["videos"] = videos
 
+    # Kitchen p1-p7 metrics: fraction of episodes completing >= k subtasks
+    if num_completed_list:
+        for k in range(1, 8):
+            results[f"p{k}"] = float(np.mean([n >= k for n in num_completed_list]))
+        results["avg_num_completed"] = float(np.mean(num_completed_list))
+
     return results
 
 
-def print_evaluation_results(results: Dict[str, Any]):
+def print_evaluation_results(results: dict[str, Any]):
     """Print evaluation results."""
     print("\n" + "=" * 80)
     print("Evaluation Results")
@@ -166,4 +187,9 @@ def print_evaluation_results(results: Dict[str, Any]):
             f"Action stats: mean={results['action_mean']:.3f}, std={results['action_std']:.3f}, "
             f"|mean|={results['action_abs_mean']:.3f}, clip_ratio={results['action_clip_ratio']:.3f}"
         )
+    # Kitchen p1-p7
+    if "p1" in results:
+        print(f"Avg completed subtasks: {results['avg_num_completed']:.2f}")
+        pk_str = " | ".join(f"p{k}={results[f'p{k}']:.2%}" for k in range(1, 8))
+        print(f"  {pk_str}")
     print("=" * 80)

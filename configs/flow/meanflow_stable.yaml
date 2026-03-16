@@ -1,0 +1,46 @@
+# MeanFlow Stable configuration (adapted from MeanFlowQL)
+# Uses stability techniques: target clipping, adaptive L2 loss, optional consistency loss
+
+name: meanflow_stable
+policy_type: meanflow_stable
+
+# Interpolant configuration
+interp_type: linear  # linear or trigonometric
+
+# Sampler configuration
+sampler:
+  type: meanflow_stable
+  num_steps: 1       # MeanFlow uses single-step sampling
+  deterministic: true
+  adaptive_step: false
+  sample_mode: stochastic   # zero initialization for deterministic sampling
+
+# Time sampling for training
+time_steps: 10000    # Discrete time grid size (>1000 uses continuous uniform)
+                     # MeanFlowQL default: 10000 (continuous uniform)
+                     # Set to 50-100 for discrete grid sampling
+
+# Consistency loss (default off, as in MeanFlowQL)
+consistency_alpha: 1.0  # Weight for consistency loss (0.0 = disabled)
+                        # Set to 1.0 to enable consistency regularization
+
+# Adaptive weighting for MeanFlow loss
+adaptive_weight:
+  enabled: true      # Use adaptive L2 loss (inverse-power reweighting)
+  gamma: 0.8         # Reweighting strength (0=uniform, 1=full inverse)
+  c: 1e-4            # Small constant in weight formula: w = 1/(loss + c)^(1-gamma)
+
+# Loss computation
+loss:
+  norm_type: l2      # l2 or l1
+  scale: 1.0         # Loss scale factor (MeanFlowQL has no extra scaling)
+
+# Training specific
+use_ema: true        # Use EMA for target network
+ema_decay: 0.995     # EMA decay rate
+
+# Notes:
+# - Target clipping to [-5, 5] is always enabled in mf_loss_stable
+# - Network outputs g_θ(x_s, s, t) which directly predicts data (x_1)
+# - At inference: actions = g_θ(noise, s=0, t=1, cond)
+# - Compatible with ACFQL/DQC: set flow_type="mf_stable" or "meanflow_stable"

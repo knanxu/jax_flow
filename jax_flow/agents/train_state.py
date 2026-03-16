@@ -88,7 +88,7 @@ class TrainState(flax.struct.PyTreeNode):
     params: Any
     tx: optax.GradientTransformation = nonpytree_field()
     opt_state: optax.OptState
-    extra_variables: Any = None  # e.g. {"batch_stats": ...} for FrozenBatchNorm
+    extra_variables: Any = None  # e.g. {"batch_stats": ...} for modules with running stats
 
     @classmethod
     def create(cls, model_def, params, tx=None, **kwargs):

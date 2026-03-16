@@ -12,7 +12,7 @@ sampler:
   num_steps: 1       # MeanFlow uses single-step sampling
   deterministic: true
   adaptive_step: false
-  sample_mode: zero   # zero initialization for MeanFlow sampling
+  sample_mode: stochastic   # zero initialization for MeanFlow sampling
 
 # MeanFlow specific parameters
 time_sampling:

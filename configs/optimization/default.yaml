@@ -2,13 +2,12 @@
 
 # Learning rate
 lr: 1e-4
-backbone_lr: 1e-5  # Differential LR for image encoder backbone (used with multi_image)
-weight_decay: 1e-5
+weight_decay: 1e-6
 
-# Optimizer
+# Optimizer (betas match Diffusion Policy)
 optimizer: adamw
 optimizer_kwargs:
-  b1: 0.9
+  b1: 0.95
   b2: 0.999
   eps: 1e-8
 

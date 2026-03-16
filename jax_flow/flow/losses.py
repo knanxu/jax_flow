@@ -177,7 +177,19 @@ def _sample_logit_normal_times(rng, batch_size, mu=-0.4, sigma=1.0, ratio_equal=
     s = jnp.where(mask, t, s)
 
     return s, t
+def sample_discrete_t(rng, batch_size, time_steps=100):
+    """Sample two independent discrete timesteps from a uniform grid.
 
+    Returns:
+        t1, t2: Arrays of shape (batch_size,) in (0, 1].
+    """
+    t_rng, t_con_rng = jax.random.split(rng)
+    time_values = jnp.linspace(1 / time_steps, 1.0, time_steps)
+    t_indices = jax.random.randint(t_rng, (batch_size,), 0, time_steps)
+    t_con_indices = jax.random.randint(t_con_rng, (batch_size,), 0, time_steps)
+    t1 = time_values[t_indices]  # (batch_size,)
+    t2 = time_values[t_con_indices]  # (batch_size,)
+    return t1, t2
 
 def _compute_delta_t(step, config):
     """Compute delta_t based on progressive schedule.
@@ -204,6 +216,163 @@ def _compute_delta_t(step, config):
     progress = jnp.asarray(step, dtype=jnp.float32) / gradient_steps
     delta_t = jnp.clip((progress - warmup_ratio) / jnp.maximum(rampup_ratio, 1e-8), 0.0, 1.0)
     return delta_t * max_delta_t
+
+def _adaptive_l2_loss(error, gamma=0.5, c=1e-3):
+    """Adaptive L2 loss from MeanFlowQL: down-weights large-error samples.
+
+    Matches MeanFlowQL's reduction: mean(error**2) over all non-batch dims
+    to get per-sample delta_sq, then adaptive reweighting.
+
+    Args:
+        error: (batch, ...) raw error (g - g_tgt), NOT squared.
+        gamma: Controls reweighting strength (0=uniform, 1=full inverse).
+        c: Small constant to prevent division by zero.
+
+    Returns:
+        Scalar loss.
+    """
+    # Mean over all non-batch dims (action_dim, horizon) — matches MeanFlowQL
+    reduce_axes = tuple(range(1, error.ndim))
+    delta_sq = jnp.mean(error ** 2, axis=reduce_axes)
+    delta_sq = jnp.maximum(delta_sq, 1e-12)
+
+    p = 1.0 - gamma
+    w = 1.0 / jnp.maximum(jnp.power(delta_sq + c, p), 1e-12)
+    w = jnp.clip(w, 1e-6, 1e6)
+    return jnp.mean(jax.lax.stop_gradient(w) * delta_sq)
+
+
+def mf_loss_stable(network, encoder, interpolant, batch, rng, config, step=None):
+    """MeanFlow loss adapted from MeanFlowQL with stability techniques.
+
+    Convention: x_s = (1-s)*x_0 + s*x_1, x_0=noise, x_1=data.
+    Network signature: u(x, s, t, cond) -> mean velocity over [s, t].
+
+    MeanFlow identity (our convention):
+        g_tgt = x_s + s*v_s + (1-s)*dg/ds
+
+    where dg/ds is the total derivative along the flow, computed via JVP.
+    Here t is fixed to 1 (one-step generation target).
+
+    Stability techniques from MeanFlowQL:
+    - Target clipping to [-5, 5]
+    - Adaptive L2 loss (inverse-power reweighting)
+    - Optional consistency loss (default off, consistency_alpha=0.0)
+
+    Args:
+        network: Flow network with signature (at, s, t, cond, training).
+        encoder: Observation encoder.
+        interpolant: Interpolant for x0 -> x1.
+        batch: Batch of data with 'observations' and 'actions'.
+        rng: Random key.
+        config: Configuration dict.
+        step: Current training step (None for evaluation).
+
+    Returns:
+        Tuple of (loss, info_dict).
+    """
+    observations = batch["observations"]
+    actions = batch["actions"]  # (batch, horizon, action_dim)
+
+    batch_size = get_batch_size(observations)
+    horizon = actions.shape[1]
+    action_dim = actions.shape[2]
+
+    # === Encode observations, sample noise ===
+    rng, crop_rng = jax.random.split(rng)
+    cond = encoder(observations, training=True, rngs={"crop": crop_rng})
+
+    rng, noise_rng = jax.random.split(rng)
+    x0 = jax.random.normal(noise_rng, (batch_size, horizon, action_dim))
+    x1 = actions
+
+    # === Sample time s ~ U(0, 1), fix t = 1 ===
+    rng, time_rng = jax.random.split(rng)
+    time_steps = config.get("time_steps", 0)
+    if time_steps > 0:
+        # Discrete grid sampling (MeanFlowQL style)
+        time_values = jnp.linspace(1 / time_steps, 1.0, time_steps)
+        indices = jax.random.randint(time_rng, (batch_size,), 0, time_steps)
+        s = time_values[indices]  # (batch_size,)
+    else:
+        # Continuous uniform sampling
+        s = jax.random.uniform(time_rng, (batch_size,))
+    t = jnp.ones((batch_size,))
+
+    # x_s = (1-s)*x0 + s*x1,  v_s = dx_s/ds (= x1 - x0 for linear)
+    x_s = interpolant.interpolate(s, x0, x1)
+    v_s = interpolant.velocity(s, x0, x1)
+
+    # === MeanFlow JVP ===
+    # Total derivative dg/ds = (∂g/∂x)·v_s + ∂g/∂s, with t fixed (tangent=0)
+    def net_fn(x, s_arg, t_arg):
+        return network(x, s_arg, t_arg, cond, training=True)
+
+    primals = (x_s, s, t)
+    tangents = (v_s, jnp.ones((batch_size,)), jnp.zeros((batch_size,)))
+
+    g, dgds = jax.jvp(net_fn, primals, tangents)
+
+    # MeanFlow target (our convention): g_tgt = x_s + s*v_s + (1-s)*dg/ds
+    s_bc = s[:, None, None]  # broadcast to (batch, horizon, action_dim)
+    g_tgt = x_s + s_bc * v_s + (1 - s_bc) * dgds
+    g_tgt = jax.lax.stop_gradient(g_tgt)
+    g_tgt = jnp.clip(g_tgt, -5, 5)  # Target clipping (MeanFlowQL)
+
+    err = g - g_tgt  # raw error, (batch, horizon, action_dim)
+
+    # === Adaptive L2 loss or standard MSE ===
+    aw_cfg = config.get("adaptive_weight", {})
+    if aw_cfg.get("enabled", False):
+        gamma = aw_cfg.get("gamma", 0.5)
+        c = aw_cfg.get("c", 1e-3)
+        mf_loss_val = _adaptive_l2_loss(err, gamma=gamma, c=c)
+    else:
+        mf_loss_val = jnp.mean(err ** 2)
+
+    # === Optional consistency loss (default off) ===
+    consistency_alpha = config.get("consistency_alpha", 0.0)
+    consistency_loss_val = 0.0
+    if consistency_alpha > 0.0:
+        rng, con_time_rng, con_noise_rng = jax.random.split(rng, 3)
+        con_time_steps = config.get("time_steps", 50)
+        if con_time_steps <= 0:
+            con_time_steps = 50
+        t1, t2 = sample_discrete_t(con_time_rng, batch_size, time_steps=con_time_steps)
+        x0_con = jax.random.normal(con_noise_rng, (batch_size, horizon, action_dim))
+
+        x_t1 = interpolant.interpolate(t1, x0_con, actions)
+        x_t2 = interpolant.interpolate(t2, x0_con, actions)
+
+        # One-step prediction of x_1 from x_t: x_1_pred = x_t + (1-t) * u(x_t, t, 1)
+        t1_ones = jnp.ones((batch_size,))
+        t2_ones = jnp.ones((batch_size,))
+        u_t1 = network(x_t1, t1, t1_ones, cond, training=True)
+        u_t2 = network(x_t2, t2, t2_ones, cond, training=True)
+
+        t1_bc = t1[:, None, None]
+        t2_bc = t2[:, None, None]
+        x_1_from_t1 = x_t1 + (1 - t1_bc) * (u_t1 - x_t1)
+        x_1_from_t2 = x_t2 + (1 - t2_bc) * (u_t2 - x_t2)
+        # Asymmetric gradient: only t1 branch gets gradients
+        x_1_from_t2 = jax.lax.stop_gradient(x_1_from_t2)
+
+        consistency_loss_val = jnp.mean(_per_sample_loss(
+            jnp.square(x_1_from_t1 - x_1_from_t2)
+        ))
+
+    # === Total loss ===
+    loss_scale = config.get("loss_scale", 0.1)
+    total_loss = loss_scale * (mf_loss_val + consistency_alpha * consistency_loss_val)
+
+    info = {
+        "loss": total_loss,
+        "mf_loss": mf_loss_val,
+        "consistency_loss": consistency_loss_val,
+        "consistency_alpha": consistency_alpha,
+    }
+
+    return total_loss, info
 
 
 def mf_loss(network, encoder, interpolant, batch, rng, config, step=None):
@@ -545,5 +714,7 @@ def get_loss_fn(loss_type="flow"):
         return mf_loss
     elif loss_type == "imf" or loss_type == "improved_meanflow":
         return imf_loss
+    elif loss_type == "mf_stable" or loss_type == "meanflow_stable":
+        return mf_loss_stable
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")

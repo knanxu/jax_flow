@@ -8,7 +8,6 @@ Handles:
 
 import subprocess
 from pathlib import Path
-from typing import Optional, Tuple
 
 
 class DatasetManager:
@@ -43,6 +42,12 @@ class DatasetManager:
 
     # DexMimicGen base directory
     DEXMIMICGEN_DIR = Path.home() / ".dexmimicgen" / "datasets"
+
+    # Push-T tasks (downloaded from HuggingFace as zarr)
+    PUSHT_TASKS = {"pusht"}
+
+    # Kitchen tasks (downloaded from HuggingFace as zip of MJL logs)
+    KITCHEN_TASKS = {"kitchen"}
 
     @staticmethod
     def resolve_dataset_path(
@@ -112,7 +117,7 @@ class DatasetManager:
         task: str,
         dataset_type: str = "ph",
         obs_type: str = "lowdim",
-    ) -> Tuple[bool, Optional[Path]]:
+    ) -> tuple[bool, Path | None]:
         """Check if dataset exists.
 
         Returns:
@@ -165,6 +170,10 @@ class DatasetManager:
             return DatasetManager._download_mimicgen(task, dataset_type, obs_type)
         elif source == "dexmimicgen":
             return DatasetManager._download_dexmimicgen(task, dataset_type, obs_type)
+        elif source == "pusht":
+            return DatasetManager._download_pusht(task, obs_type)
+        elif source == "kitchen":
+            return DatasetManager._download_kitchen(task)
         else:
             print(f"Error: Unknown source '{source}'")
             return False
@@ -403,6 +412,26 @@ class DatasetManager:
         return target_path.exists()
 
     @staticmethod
+    def _download_pusht(task: str, obs_type: str) -> str | None:
+        """Download Push-T dataset from HuggingFace. Returns path."""
+        try:
+            from jax_flow.data.pusht_dataset import download_pusht_dataset
+            return download_pusht_dataset()
+        except Exception as e:
+            print(f"Error downloading Push-T dataset: {e}")
+            return None
+
+    @staticmethod
+    def _download_kitchen(task: str) -> str | None:
+        """Download Kitchen dataset from HuggingFace. Returns path."""
+        try:
+            from jax_flow.data.kitchen_dataset import download_kitchen_dataset
+            return download_kitchen_dataset()
+        except Exception as e:
+            print(f"Error downloading Kitchen dataset: {e}")
+            return None
+
+    @staticmethod
     def ensure_dataset(
         dataset_path: str,
         task: str,
@@ -410,7 +439,7 @@ class DatasetManager:
         obs_type: str = "lowdim",
         source: str = "robomimic",
         auto_download: bool = True,
-    ) -> Optional[Path]:
+    ) -> Path | None:
         """Ensure dataset exists, download if missing.
 
         Args:
@@ -424,6 +453,37 @@ class DatasetManager:
         Returns:
             Resolved path if exists/downloaded, None if failed
         """
+        # Push-T / Kitchen: skip robomimic path resolution, use own download logic
+        if source in ("pusht", "kitchen"):
+            # Try dataset_path as-is first
+            path = Path(dataset_path).expanduser()
+            if path.exists():
+                print(f"✓ Dataset found at: {path}")
+                return path
+            # Try relative to project root
+            project_root = Path(__file__).parent.parent.parent
+            rel_path = project_root / dataset_path
+            if rel_path.exists():
+                print(f"✓ Dataset found at: {rel_path}")
+                return rel_path
+
+            if not auto_download:
+                print(f"✗ Dataset not found at: {path}")
+                return None
+
+            print(f"✗ Dataset not found, attempting automatic download ({source})...")
+            if source == "pusht":
+                result_path = DatasetManager._download_pusht(task, obs_type)
+            else:
+                result_path = DatasetManager._download_kitchen(task)
+            if result_path and Path(result_path).exists():
+                print(f"✓ Dataset downloaded to: {result_path}")
+                return Path(result_path)
+            print(f"\n✗ Failed to download {source} dataset")
+            print(f"  pip install jax_flow[{source}]")
+            return None
+
+        # Robomimic / MimicGen / DexMimicGen path resolution
         exists, resolved_path = DatasetManager.check_dataset_exists(
             dataset_path, task, dataset_type, obs_type
         )
@@ -434,7 +494,7 @@ class DatasetManager:
 
         if not auto_download:
             print(f"✗ Dataset not found at: {resolved_path}")
-            print(f"\nTo download manually, run:")
+            print("\nTo download manually, run:")
             print(f"  python scripts/download_data.py --task {task} --obs_type {obs_type}")
             return None
 
@@ -444,7 +504,7 @@ class DatasetManager:
         elif source == "robomimic" and task in DatasetManager.DEXMIMICGEN_TASKS:
             source = "dexmimicgen"
 
-        # Auto-download
+        # Auto-download (robomimic / mimicgen / dexmimicgen)
         print(f"✗ Dataset not found, attempting automatic download ({source})...")
         success = DatasetManager.download_dataset(
             task=task,
@@ -461,7 +521,7 @@ class DatasetManager:
             if exists:
                 return resolved_path
 
-        print(f"\n✗ Failed to download dataset")
-        print(f"\nPlease download manually:")
+        print("\n✗ Failed to download dataset")
+        print("\nPlease download manually:")
         print(f"  python scripts/download_data.py --task {task} --obs_type {obs_type}")
         return None

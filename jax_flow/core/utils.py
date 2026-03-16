@@ -81,6 +81,8 @@ def create_optimizer(
     warmup_steps: int = 0,
     total_steps: int = 100000,
     grad_clip_norm: float = 0.0,
+    b1: float = 0.95,
+    b2: float = 0.999,
 ) -> optax.GradientTransformation:
     """Create optimizer with optional learning rate schedule and gradient clipping.
 
@@ -91,6 +93,8 @@ def create_optimizer(
         warmup_steps: Number of warmup steps.
         total_steps: Total training steps.
         grad_clip_norm: Max gradient norm for clipping. 0 = no clipping.
+        b1: Adam beta1.
+        b2: Adam beta2.
 
     Returns:
         Optax optimizer.
@@ -111,9 +115,13 @@ def create_optimizer(
     if grad_clip_norm > 0.0:
         chain.append(optax.clip_by_global_norm(grad_clip_norm))
     if weight_decay > 0.0:
-        chain.append(optax.adamw(learning_rate=lr_schedule, weight_decay=weight_decay))
+        chain.append(
+            optax.adamw(
+                learning_rate=lr_schedule, weight_decay=weight_decay, b1=b1, b2=b2
+            )
+        )
     else:
-        chain.append(optax.adam(learning_rate=lr_schedule))
+        chain.append(optax.adam(learning_rate=lr_schedule, b1=b1, b2=b2))
 
     if len(chain) == 1:
         return chain[0]

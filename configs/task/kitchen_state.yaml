@@ -1,0 +1,27 @@
+# Kitchen task with state observations (60D)
+
+name: kitchen_state
+env_name: kitchen-microwave-kettle-burner-light-v0
+dataset_name: kitchen
+obs_type: state
+task_source: kitchen
+
+# Dataset configuration
+dataset:
+  path: kitchen/kitchen_demos_multitask
+  dataset_repo: ChaoyiPan/mip-dataset
+  dataset_filename: kitchen/kitchen_demos_multitask.zip
+  horizon: 16
+  obs_steps: 2
+  act_steps: 8
+  normalize_obs: true
+  normalize_act: true
+  norm_type: min_max
+
+# Environment configuration
+env:
+  max_episode_steps: 280
+
+# Observation and action dimensions
+obs_dim: 60
+act_dim: 9

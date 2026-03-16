@@ -1,0 +1,32 @@
+# Push-T task with image observations
+
+name: pusht_image
+env_name: PushT
+dataset_name: pusht
+obs_type: image
+task_source: pusht
+
+# Dataset configuration
+dataset:
+  path: pusht/pusht_cchi_v7_replay.zarr
+  dataset_repo: ChaoyiPan/mip-dataset
+  dataset_filename: pusht/pusht_cchi_v7_replay.zarr.zip
+  horizon: 16
+  obs_steps: 2
+  act_steps: 8
+  normalize_obs: true
+  normalize_act: true
+  norm_type: min_max
+
+  # Image keys
+  image_keys:
+    - image
+  lowdim_keys:
+    - agent_pos
+
+# Environment configuration
+env:
+  max_episode_steps: 300
+
+# Observation and action dimensions (image mode uses dict obs)
+act_dim: 2

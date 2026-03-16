@@ -52,8 +52,24 @@ robomimic = [
     "robosuite>=1.4.0",
 ]
 
+pusht = [
+    "pymunk>=6.0.0",
+    "pygame>=2.1.0",
+    "shapely>=2.0.0",
+    "scikit-image>=0.21.0",
+    "zarr>=2.16.0",
+    "huggingface-hub>=0.20.0",
+]
+
+kitchen = [
+    "dm-control>=1.0.0",
+    "gym>=0.21.0,<0.26.0",
+    "huggingface-hub>=0.20.0",
+    "mujoco>=2.3.0",
+]
+
 all = [
-    "jax_flow[dev,robomimic]",
+    "jax_flow[dev,robomimic,pusht,kitchen]",
 ]
 
 [project.urls]
@@ -76,6 +92,7 @@ exclude = [
     "build",
     "dist",
     "*.egg-info",
+    "jax_flow/envs/kitchen/thirdparty",
 ]
 
 [tool.ruff.lint]
@@ -131,6 +148,9 @@ known-third-party = ["jax", "flax", "optax", "chex", "jaxtyping"]
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401", "F403", "F405"]  # 允许未使用的导入和 star imports
 "tests/**/*.py" = ["B008", "B011"]  # 测试中允许函数调用作为默认参数
+"jax_flow/envs/kitchen/thirdparty/**/*.py" = ["ALL"]  # 第三方代码不检查
+"jax_flow/envs/pusht/pymunk_override.py" = ["ALL"]  # 第三方代码不检查
+"jax_flow/envs/pusht/pymunk_keypoint_manager.py" = ["D", "N", "UP"]  # 宽松检查
 
 [tool.ruff.format]
 # Use Google style formatting
@@ -165,6 +185,7 @@ exclude = [
     ".venv",
     "build",
     "dist",
+    "jax_flow/envs/kitchen/thirdparty",
 ]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
