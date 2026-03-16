@@ -266,11 +266,26 @@ Note:
         task = None
     elif args.task:
         task = args.task
-        # Try multiple possible demo file names (prioritize v15 for compatibility)
+
+        # Build search candidates across multiple locations:
+        # 1. ~/.robomimic/ (user data dir)
+        # 2. robomimic's default DATASET_DIR (site-packages/datasets/)
+        search_dirs = [
+            DatasetManager.ROBOMIMIC_DIR / task / args.dataset_type,
+        ]
+
+        # Also check robomimic's configured download path
+        try:
+            from robomimic.macros import DATASET_DIR
+            robomimic_dataset_dir = Path(DATASET_DIR) / task / args.dataset_type
+            if robomimic_dataset_dir not in search_dirs:
+                search_dirs.append(robomimic_dataset_dir)
+        except (ImportError, AttributeError):
+            pass
+
+        demo_names = ["demo_v141.hdf5", "demo_v15.hdf5", "demo.hdf5"]
         demo_candidates = [
-            DatasetManager.ROBOMIMIC_DIR / task / args.dataset_type / "demo_v15.hdf5",
-            DatasetManager.ROBOMIMIC_DIR / task / args.dataset_type / "demo_v141.hdf5",
-            DatasetManager.ROBOMIMIC_DIR / task / args.dataset_type / "demo.hdf5",
+            d / name for d in search_dirs for name in demo_names
         ]
 
         demo_path = None
