@@ -40,7 +40,7 @@ env:
   control_freq: 20
 
 # Observation and action dimensions
-obs_dim: 39            # State observation dimension
+obs_dim: 19            # robot0_eef_pos(3) + robot0_eef_quat(4) + robot0_gripper_qpos(2) + object(10)
 act_dim: 7             # Action dimension (6 DoF + gripper)
 
 # Task-specific parameters

@@ -19,9 +19,9 @@ dataset:
   # Low-dimensional observation keys (mixed with images)
   lowdim_keys: ['robot0_eef_pos', 'robot0_eef_quat', 'robot0_gripper_qpos']
 
-  # Image processing
-  image_size: [84, 84]
-  crop_shape: [76, 76]
+  # Image processing (tool_hang uses 240x240 rendering)
+  image_size: [240, 240]
+  crop_shape: [216, 216]
 
   # Normalization
   normalize_obs: true
@@ -30,7 +30,7 @@ dataset:
 
 # Environment configuration
 env:
-  max_episode_steps: 400
+  max_episode_steps: 700
   use_camera_obs: true
 
 # Action dimension

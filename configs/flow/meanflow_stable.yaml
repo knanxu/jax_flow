@@ -37,7 +37,6 @@ loss:
 
 # Training specific
 use_ema: true        # Use EMA for target network
-ema_decay: 0.995     # EMA decay rate
 
 # Notes:
 # - Target clipping to [-5, 5] is always enabled in mf_loss_stable

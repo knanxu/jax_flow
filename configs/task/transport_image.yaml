@@ -30,7 +30,7 @@ dataset:
 
 # Environment configuration
 env:
-  max_episode_steps: 400
+  max_episode_steps: 700
   use_camera_obs: true
 
 # Action dimension

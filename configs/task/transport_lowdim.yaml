@@ -20,10 +20,10 @@ dataset:
 
 # Environment configuration
 env:
-  max_episode_steps: 400
+  max_episode_steps: 700
 
 # Observation and action dimensions
-obs_dim: 82
+obs_dim: 59
 act_dim: 14
 
 # Observation keys to use

@@ -40,4 +40,3 @@ loss:
 
 # Training specific
 use_ema: true         # Use EMA for target network
-ema_decay: 0.995      # EMA decay rate

@@ -144,7 +144,7 @@ def main(cfg: DictConfig):
         "horizon": cfg.task.dataset.horizon,
         "obs_steps": cfg.task.dataset.obs_steps,
         "act_steps": cfg.task.dataset.act_steps,
-        "val_ratio": 0.1,
+        "val_ratio": 0.02,
     }
 
     if task_source in ("pusht", "kitchen"):
@@ -249,7 +249,12 @@ def main(cfg: DictConfig):
         "sample_mode": cfg.flow.sampler.get("sample_mode", "stochastic"),
         "loss_scale": cfg.flow.loss.get("scale", 0.1),
         # EMA
+        "ema_type": cfg.optimization.get("ema_type", "fixed"),
         "ema_decay": cfg.optimization.get("ema_decay", 0.995),
+        "ema_inv_gamma": cfg.optimization.get("ema_inv_gamma", 1.0),
+        "ema_power": cfg.optimization.get("ema_power", 0.75),
+        "ema_min_value": cfg.optimization.get("ema_min_value", 0.0),
+        "ema_max_value": cfg.optimization.get("ema_max_value", 0.9999),
         # MIP t_two_step
         "t_two_step": cfg.flow.get("t_two_step", 0.9),
         # Delta-t schedule for MeanFlow

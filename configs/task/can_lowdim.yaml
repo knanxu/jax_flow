@@ -23,7 +23,7 @@ env:
   max_episode_steps: 400
 
 # Observation and action dimensions
-obs_dim: 39
+obs_dim: 23
 act_dim: 7
 
 # Observation keys to use

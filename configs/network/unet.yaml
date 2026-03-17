@@ -6,7 +6,7 @@ network_type: unet
 # Architecture parameters
 model_dim: 256
 emb_dim: 256
-dim_mult: [1, 2, 2]
+dim_mult: [1, 2, 4]
 kernel_size: 5
 n_groups: 8
 

@@ -23,6 +23,15 @@ def _ema_update(ema_params, new_params, decay):
     )
 
 
+def _progressive_ema_decay(step, inv_gamma=1.0, power=0.75, min_value=0.0, max_value=0.9999):
+    """Compute progressive EMA decay matching Diffusion Policy.
+
+    decay = clamp(1 - (1 + step / inv_gamma) ^ (-power), min_value, max_value)
+    """
+    decay = 1.0 - (1.0 + step / inv_gamma) ** (-power)
+    return jnp.clip(decay, min_value, max_value)
+
+
 def _create_flow_def(network_type, action_dim, config, cond_dim=None):
     """Create flow network definition based on network_type.
 
@@ -262,8 +271,18 @@ class BCAgent(flax.struct.PyTreeNode):
         new_network, info = self.network.apply_loss_fn(loss_fn=loss_fn)
 
         # Update EMA params
-        ema_decay = self.config.get("ema_decay", 0.995)
-        new_ema_params = _ema_update(self.ema_params, new_network.params, ema_decay)
+        ema_type = self.config.get("ema_type", "fixed")
+        if ema_type == "progressive":
+            decay = _progressive_ema_decay(
+                new_network.step,
+                inv_gamma=self.config.get("ema_inv_gamma", 1.0),
+                power=self.config.get("ema_power", 0.75),
+                min_value=self.config.get("ema_min_value", 0.0),
+                max_value=self.config.get("ema_max_value", 0.9999),
+            )
+        else:
+            decay = self.config.get("ema_decay", 0.995)
+        new_ema_params = _ema_update(self.ema_params, new_network.params, decay)
 
         return self.replace(
             network=new_network, ema_params=new_ema_params, rng=new_rng
