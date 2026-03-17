@@ -524,6 +524,9 @@ def main(cfg: DictConfig):
                 verbose=True,
             )
 
+            # Close environment to avoid segfault from MuJoCo GC
+            eval_env.close()
+
             # Print results
             print_evaluation_results(eval_results)
 
