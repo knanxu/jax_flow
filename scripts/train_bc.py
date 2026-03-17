@@ -339,6 +339,50 @@ def main(cfg: DictConfig):
     train_losses = []
     eval_count = 0
 
+    # Create evaluation environment once (avoid repeated OpenGL context create/destroy → segfault)
+    eval_env = None
+    if cfg.eval.eval_interval > 0:
+        if task_source in ("pusht", "kitchen"):
+            eval_env = make_env(
+                task_source=task_source,
+                obs_type=obs_type if task_source == "pusht" else None,
+                env_name=cfg.task.env_name if task_source == "kitchen" else None,
+                obs_normalizer=normalizers.get("obs"),
+                action_normalizer=normalizers["action"],
+                lowdim_normalizer=normalizers.get("lowdim"),
+                max_episode_steps=cfg.task.env.max_episode_steps,
+                frame_stack=cfg.task.dataset.obs_steps,
+                act_exec_steps=cfg.task.dataset.act_steps,
+                seed=cfg.seed,
+            )
+        else:
+            eval_env = make_robomimic_env(
+                env_name=cfg.task.env_name,
+                dataset_path=resolved_path,
+                obs_type=cfg.task.obs_type,
+                obs_keys=tuple(
+                    cfg.task.dataset.get(
+                        "obs_keys",
+                        [
+                            "robot0_eef_pos",
+                            "robot0_eef_quat",
+                            "robot0_gripper_qpos",
+                            "object",
+                        ],
+                    )
+                ),
+                image_keys=tuple(image_keys) if is_image else None,
+                lowdim_keys=tuple(lowdim_keys) if is_image else None,
+                obs_normalizer=normalizers.get("obs"),
+                action_normalizer=normalizers["action"],
+                lowdim_normalizer=normalizers.get("lowdim"),
+                max_episode_steps=cfg.task.env.max_episode_steps,
+                frame_stack=cfg.task.dataset.obs_steps,
+                act_exec_steps=cfg.task.dataset.act_steps,
+                seed=cfg.seed,
+                render_offscreen=cfg.eval.save_video or cfg.eval.render,
+            )
+
     pbar = tqdm(range(cfg.optimization.gradient_steps), desc="Training")
 
     for step in pbar:
@@ -466,51 +510,9 @@ def main(cfg: DictConfig):
                 )
 
         # Environment evaluation
-        if step % cfg.eval.eval_interval == 0 and step > 0:
+        if step % cfg.eval.eval_interval == 0 and step > 0 and eval_env is not None:
             print(f"\n[Step {step}] Running environment evaluation...")
             eval_count += 1
-
-            # Create evaluation environment
-            if task_source in ("pusht", "kitchen"):
-                eval_env = make_env(
-                    task_source=task_source,
-                    obs_type=obs_type if task_source == "pusht" else None,
-                    env_name=cfg.task.env_name if task_source == "kitchen" else None,
-                    obs_normalizer=normalizers.get("obs"),
-                    action_normalizer=normalizers["action"],
-                    lowdim_normalizer=normalizers.get("lowdim"),
-                    max_episode_steps=cfg.task.env.max_episode_steps,
-                    frame_stack=cfg.task.dataset.obs_steps,
-                    act_exec_steps=cfg.task.dataset.act_steps,
-                    seed=cfg.seed,
-                )
-            else:
-                eval_env = make_robomimic_env(
-                    env_name=cfg.task.env_name,
-                    dataset_path=resolved_path,
-                    obs_type=cfg.task.obs_type,
-                    obs_keys=tuple(
-                        cfg.task.dataset.get(
-                            "obs_keys",
-                            [
-                                "robot0_eef_pos",
-                                "robot0_eef_quat",
-                                "robot0_gripper_qpos",
-                                "object",
-                            ],
-                        )
-                    ),
-                    image_keys=tuple(image_keys) if is_image else None,
-                    lowdim_keys=tuple(lowdim_keys) if is_image else None,
-                    obs_normalizer=normalizers.get("obs"),
-                    action_normalizer=normalizers["action"],
-                    lowdim_normalizer=normalizers.get("lowdim"),
-                    max_episode_steps=cfg.task.env.max_episode_steps,
-                    frame_stack=cfg.task.dataset.obs_steps,
-                    act_exec_steps=cfg.task.dataset.act_steps,
-                    seed=cfg.seed,
-                    render_offscreen=cfg.eval.save_video or cfg.eval.render,
-                )
 
             # Run evaluation
             eval_results = evaluate_policy(
@@ -523,9 +525,6 @@ def main(cfg: DictConfig):
                 num_videos=cfg.eval.num_videos,
                 verbose=True,
             )
-
-            # Close environment to avoid segfault from MuJoCo GC
-            eval_env.close()
 
             # Print results
             print_evaluation_results(eval_results)
@@ -595,6 +594,10 @@ def main(cfg: DictConfig):
                 cleanup_old_checkpoints(
                     output_dir, keep_last_n=cfg.checkpoint.keep_last_n
                 )
+
+    # Close evaluation environment
+    if eval_env is not None:
+        eval_env.close()
 
     print("\n" + "=" * 80)
     print("Training Complete!")
