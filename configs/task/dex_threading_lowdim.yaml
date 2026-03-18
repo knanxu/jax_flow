@@ -24,7 +24,8 @@ env:
 
 # Observation and action dimensions
 obs_dim: 18            # robot0_eef_pos(3) + robot0_eef_quat(4) + robot0_gripper_qpos(2) + robot1_eef_pos(3) + robot1_eef_quat(4) + robot1_gripper_qpos(2)
-act_dim: 14
+act_dim: 20
+abs_action: true
 
 # Observation keys (dual-arm, no object state)
 obs_keys:

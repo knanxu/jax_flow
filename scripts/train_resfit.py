@@ -24,9 +24,9 @@ from tqdm import tqdm
 from jax_flow.agents.bc_agent import BCAgent
 from jax_flow.agents.IL_RLFiT.resfit_agent import ResFiTAgent
 from jax_flow.core.checkpoint import (
+    cleanup_old_checkpoints,
     load_checkpoint,
     save_resfit_checkpoint,
-    cleanup_old_checkpoints,
 )
 from jax_flow.core.evaluation import evaluate_policy, print_evaluation_results
 from jax_flow.data.resfit_replay_buffer import ResFiTReplayBuffer
@@ -132,9 +132,12 @@ def create_env(
         env_name=config["env_name"],
         dataset_path=dataset_path,
         obs_type=obs_type,
-        obs_keys=tuple(config.get("obs_keys", [
-            "robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"
-        ])),
+        obs_keys=tuple(
+            config.get(
+                "obs_keys",
+                ["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"],
+            )
+        ),
         image_keys=tuple(config.get("image_keys", ())) if is_image else None,
         lowdim_keys=tuple(config.get("lowdim_keys", ())) if is_image else None,
         obs_normalizer=normalizers.get("obs"),
@@ -144,6 +147,7 @@ def create_env(
         frame_stack=config.get("obs_steps", 2),
         act_exec_steps=None,  # No ActionChunkingWrapper
         seed=seed,
+        abs_action=config.get("abs_action", False),
     )
 
     # Wrap with residual wrapper
@@ -181,6 +185,10 @@ def fill_offline_buffer(
     if is_image:
         dataset_kwargs["image_keys"] = tuple(config.get("image_keys", ()))
         dataset_kwargs["lowdim_keys"] = tuple(config.get("lowdim_keys", ()))
+
+    abs_action = config.get("abs_action", False)
+    if abs_action:
+        dataset_kwargs["abs_action"] = True
 
     dataset = make_robomimic_dataset(
         dataset_path=dataset_path,
@@ -293,7 +301,14 @@ def _to_jax_batch(batch: dict) -> dict:
         elif key in batch:
             jax_batch[key] = jnp.array(batch[key])
 
-    for key in ("action", "base_action", "next_base_action", "reward", "done", "discount"):
+    for key in (
+        "action",
+        "base_action",
+        "next_base_action",
+        "reward",
+        "done",
+        "discount",
+    ):
         if key in batch:
             jax_batch[key] = jnp.array(batch[key])
 
@@ -303,7 +318,6 @@ def _to_jax_batch(batch: dict) -> dict:
 @hydra.main(version_base=None, config_path="../configs/resfit", config_name="default")
 def main(cfg: DictConfig):
     """Main ResFiT training function."""
-
     print("=" * 80)
     print("ResFiT: Residual Fine-Tuning")
     print("=" * 80)
@@ -335,7 +349,7 @@ def main(cfg: DictConfig):
 
     # Build unified config dict
     def _to_dict(c):
-        if hasattr(c, 'items'):
+        if hasattr(c, "items"):
             try:
                 return dict(OmegaConf.to_container(c, resolve=True))
             except ValueError:
@@ -357,21 +371,35 @@ def main(cfg: DictConfig):
     dataset_path = bc_config.get("dataset_path", "")
 
     # Merge BC config into config (BC config provides env/task info as defaults)
-    for key in ("env_name", "obs_keys", "obs_type", "action_dim", "obs_dim",
-                "horizon", "obs_steps", "image_keys", "lowdim_keys"):
+    for key in (
+        "env_name",
+        "obs_keys",
+        "obs_type",
+        "action_dim",
+        "obs_dim",
+        "horizon",
+        "obs_steps",
+        "image_keys",
+        "lowdim_keys",
+        "abs_action",
+    ):
         if key not in config and key in bc_config:
             config[key] = bc_config[key]
     # Derive act_steps from horizon if not set
     if "act_steps" not in config:
         config["act_steps"] = config.get("horizon", 16) // 2
 
-    print(f"BC config: obs_type={bc_config.get('obs_type')}, "
-          f"action_dim={bc_config.get('action_dim')}, "
-          f"horizon={bc_config.get('horizon')}")
+    print(
+        f"BC config: obs_type={bc_config.get('obs_type')}, "
+        f"action_dim={bc_config.get('action_dim')}, "
+        f"horizon={bc_config.get('horizon')}"
+    )
 
     # Set output directory now that we have env_name
     env_name = config.get("env_name", "unknown")
-    output_dir = Path(cfg.get("checkpoint_dir", "checkpoints")) / f"{env_name}_{obs_type}_resfit"
+    output_dir = (
+        Path(cfg.get("checkpoint_dir", "checkpoints")) / f"{env_name}_{obs_type}_resfit"
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {output_dir}")
 
@@ -401,7 +429,9 @@ def main(cfg: DictConfig):
     # Get obs shape from env (obs includes base_action, we need to exclude it)
     obs_sample, _ = train_env.reset()
     if isinstance(obs_sample, dict):
-        obs_shape = {k: np.array(v).shape for k, v in obs_sample.items() if k != "base_action"}
+        obs_shape = {
+            k: np.array(v).shape for k, v in obs_sample.items() if k != "base_action"
+        }
     else:
         obs_shape = np.array(obs_sample).shape
 
@@ -417,10 +447,14 @@ def main(cfg: DictConfig):
     print("\nCreating ResFiT agent...")
     # Build example obs for agent init
     if isinstance(obs_sample, dict):
-        ex_obs = {k: jnp.array(np.array(v)[np.newaxis, ...]) for k, v in obs_sample.items()}
+        ex_obs = {
+            k: jnp.array(np.array(v)[np.newaxis, ...]) for k, v in obs_sample.items()
+        }
     else:
-        ex_obs = {"obs": jnp.array(np.array(obs_sample)[np.newaxis, ...]),
-                  "base_action": jnp.zeros((1, action_dim))}
+        ex_obs = {
+            "obs": jnp.array(np.array(obs_sample)[np.newaxis, ...]),
+            "base_action": jnp.zeros((1, action_dim)),
+        }
 
     ex_actions = jnp.zeros((1, action_dim))
 
@@ -438,6 +472,7 @@ def main(cfg: DictConfig):
     if wandb_enabled:
         try:
             import wandb
+
             wandb.init(
                 project=cfg.wandb.get("project", "jax_flow_resfit"),
                 entity=cfg.wandb.get("entity", None),
@@ -463,14 +498,18 @@ def main(cfg: DictConfig):
     pbar = tqdm(total=learning_starts, desc="Exploration")
     while len(online_buffer) < learning_starts:
         # Random residual action
-        residual = rng.uniform(-1, 1, size=(action_dim,)).astype(np.float32) * noise_scale
+        residual = (
+            rng.uniform(-1, 1, size=(action_dim,)).astype(np.float32) * noise_scale
+        )
 
         next_obs, reward, terminated, truncated, info = train_env.step(residual)
         done = terminated or truncated
 
         # Extract base_action from obs/next_obs, store separately
         combined_action = info.get("combined_action", residual)
-        cur_base_action = info.get("base_action", np.zeros(action_dim, dtype=np.float32))
+        cur_base_action = info.get(
+            "base_action", np.zeros(action_dim, dtype=np.float32)
+        )
 
         # Split obs: remove base_action for buffer storage
         obs_np, obs_base = _split_obs(obs)
@@ -517,13 +556,18 @@ def main(cfg: DictConfig):
         agent, info = agent.update_critic(jax_batch)
 
         if step % algo.get("log_interval", 1000) == 0 and step > 0:
-            print(f"  Step {step}: critic_loss={float(info['critic_loss']):.4f}, "
-                  f"q_mean={float(info['q_mean']):.4f}")
+            print(
+                f"  Step {step}: critic_loss={float(info['critic_loss']):.4f}, "
+                f"q_mean={float(info['q_mean']):.4f}"
+            )
             if wandb_enabled:
-                wandb.log({
-                    "warmup/critic_loss": float(info["critic_loss"]),
-                    "warmup/q_mean": float(info["q_mean"]),
-                }, step=step)
+                wandb.log(
+                    {
+                        "warmup/critic_loss": float(info["critic_loss"]),
+                        "warmup/q_mean": float(info["q_mean"]),
+                    },
+                    step=step,
+                )
 
     # ============================================================
     # Phase 3: Full Training
@@ -558,7 +602,9 @@ def main(cfg: DictConfig):
 
         # Get residual action from agent
         if isinstance(obs, dict):
-            obs_batch = {k: jnp.array(np.array(v)[np.newaxis, ...]) for k, v in obs.items()}
+            obs_batch = {
+                k: jnp.array(np.array(v)[np.newaxis, ...]) for k, v in obs.items()
+            }
         else:
             obs_batch = jnp.array(np.array(obs)[np.newaxis, ...])
 
@@ -576,7 +622,9 @@ def main(cfg: DictConfig):
         done = terminated or truncated
 
         combined_action = info.get("combined_action", residual)
-        cur_base_action = info.get("base_action", np.zeros(action_dim, dtype=np.float32))
+        cur_base_action = info.get(
+            "base_action", np.zeros(action_dim, dtype=np.float32)
+        )
 
         # Store in online buffer (split obs: remove base_action)
         obs_np, _ = _split_obs(obs)
@@ -598,11 +646,14 @@ def main(cfg: DictConfig):
         if done:
             num_episodes += 1
             if wandb_enabled:
-                wandb.log({
-                    "train/episode_reward": episode_reward,
-                    "train/episode_length": episode_length,
-                    "train/num_episodes": num_episodes,
-                }, step=global_step)
+                wandb.log(
+                    {
+                        "train/episode_reward": episode_reward,
+                        "train/episode_length": episode_length,
+                        "train/num_episodes": num_episodes,
+                    },
+                    step=global_step,
+                )
             episode_reward = 0.0
             episode_length = 0
             obs, _ = train_env.reset()
@@ -640,10 +691,12 @@ def main(cfg: DictConfig):
                 log_dict["train/actor_loss"] = float(actor_info["actor_loss"])
                 log_dict["train/actor_q_mean"] = float(actor_info["actor_q_mean"])
 
-            pbar.set_postfix({
-                "c_loss": f"{float(critic_info['critic_loss']):.3f}",
-                "q": f"{float(critic_info['q_mean']):.2f}",
-            })
+            pbar.set_postfix(
+                {
+                    "c_loss": f"{float(critic_info['critic_loss']):.3f}",
+                    "q": f"{float(critic_info['q_mean']):.2f}",
+                }
+            )
 
             if wandb_enabled:
                 wandb.log(log_dict, step=global_step)
@@ -663,11 +716,14 @@ def main(cfg: DictConfig):
             print_evaluation_results(eval_results)
 
             if wandb_enabled:
-                wandb.log({
-                    "eval/success_rate": eval_results["success_rate"],
-                    "eval/avg_length": eval_results["avg_length"],
-                    "eval/avg_return": eval_results["avg_return"],
-                }, step=global_step)
+                wandb.log(
+                    {
+                        "eval/success_rate": eval_results["success_rate"],
+                        "eval/avg_length": eval_results["avg_length"],
+                        "eval/avg_return": eval_results["avg_return"],
+                    },
+                    step=global_step,
+                )
 
             # Save best model
             if eval_results["success_rate"] > best_success_rate:

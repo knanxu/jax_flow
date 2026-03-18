@@ -151,6 +151,7 @@ pyright jax_flow/
 - **网络签名**: `(at, s, t, obs) -> velocity`，其中 `at: (batch, horizon, action_dim)`，网络内部 flatten horizon 维度处理。
 - **Action Chunking**: 网络预测 `horizon` 步动作序列，环境只执行前 `act_exec_steps` 步（Diffusion Policy 风格）。
 - **Encoder 与核心网络分离**: Encoder 独立编码观测为 `cond` 向量，核心网络（MLP/UNet/Transformer）接收 `cond` 作为条件。
+- **6D Rotation Representation**: Robomimic/MimicGen 任务默认使用连续 rotation_6d 表示（`abs_action: true`），将 axis_angle(3D) 转为 rot6d(6D)，单臂 action 从 7D→10D，双臂从 14D→20D。避免 axis_angle 在 ±π 处的拓扑不连续性，提升旋转密集任务的成功率。
 
 ### Core Components
 
@@ -186,6 +187,7 @@ pyright jax_flow/
 5. **Data** (`jax_flow/data/`)
    - `robomimic_dataset.py`: Lowdim HDF5 dataset, per-episode 存储 + 全局索引
    - `robomimic_image_dataset.py`: Image HDF5 dataset, 支持多相机 + lowdim 混合
+   - `rotation_utils.py`: axis_angle ↔ rotation_6d 转换，`transform_action_to_6d` / `undo_transform_action` 支持单臂(7↔10D)和双臂(14↔20D)
    - `pusht_dataset.py`: Push-T zarr 数据集，支持 state/keypoint/image 三种 obs type，HuggingFace 自动下载
    - `kitchen_dataset.py`: Kitchen MJL 二进制日志数据集，60D obs + 9D action，HuggingFace 自动下载
    - `normalizer.py`: MinMax, Image, Identity normalizers

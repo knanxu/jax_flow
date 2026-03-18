@@ -24,15 +24,29 @@ from jax_flow.envs import make_robomimic_env
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate trained BC policy")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint file")
-    parser.add_argument("--num_episodes", type=int, default=50, help="Number of episodes to evaluate")
-    parser.add_argument("--max_steps", type=int, default=500, help="Maximum steps per episode")
-    parser.add_argument("--render", action="store_true", help="Render episodes in real-time")
-    parser.add_argument("--save_video", action="store_true", help="Save videos of episodes")
-    parser.add_argument("--num_videos", type=int, default=3, help="Number of videos to save")
+    parser.add_argument(
+        "--checkpoint", type=str, required=True, help="Path to checkpoint file"
+    )
+    parser.add_argument(
+        "--num_episodes", type=int, default=50, help="Number of episodes to evaluate"
+    )
+    parser.add_argument(
+        "--max_steps", type=int, default=500, help="Maximum steps per episode"
+    )
+    parser.add_argument(
+        "--render", action="store_true", help="Render episodes in real-time"
+    )
+    parser.add_argument(
+        "--save_video", action="store_true", help="Save videos of episodes"
+    )
+    parser.add_argument(
+        "--num_videos", type=int, default=3, help="Number of videos to save"
+    )
     parser.add_argument("--video_fps", type=int, default=30, help="Video FPS")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--output_dir", type=str, default=None, help="Output directory for videos")
+    parser.add_argument(
+        "--output_dir", type=str, default=None, help="Output directory for videos"
+    )
     args = parser.parse_args()
 
     print("=" * 80)
@@ -67,18 +81,27 @@ def main():
     # Get observation keys
     if obs_type == "image":
         image_keys = tuple(config.get("image_keys", ("agentview_image",)))
-        lowdim_keys = tuple(config.get("lowdim_keys", ("robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos")))
+        lowdim_keys = tuple(
+            config.get(
+                "lowdim_keys",
+                ("robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos"),
+            )
+        )
         obs_keys = None
     else:
         image_keys = None
         lowdim_keys = None
-        obs_keys = tuple(config.get("obs_keys", (
-            "robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"
-        )))
+        obs_keys = tuple(
+            config.get(
+                "obs_keys",
+                ("robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"),
+            )
+        )
 
     # Create example observations for agent restoration
     print("Restoring agent...")
     import jax.numpy as jnp
+
     if obs_type == "image":
         # Dict observations
         ex_observations = {}
@@ -98,11 +121,15 @@ def main():
 
     # Restore agent
     from jax_flow.core.checkpoint import restore_agent
+
     agent, _ = restore_agent(args.checkpoint, BCAgent, ex_observations, ex_actions)
     print(f"✓ Agent restored (step {checkpoint.get('training_step', 'unknown')})")
 
     # Create evaluation environment
     print("\nCreating evaluation environment...")
+
+    # Check if checkpoint used 6D rotation representation
+    abs_action = config.get("abs_action", False)
 
     eval_env = make_robomimic_env(
         env_name=env_name,
@@ -119,6 +146,7 @@ def main():
         act_exec_steps=act_steps,
         seed=args.seed,
         render_offscreen=args.save_video or args.render,
+        abs_action=abs_action,
     )
     print(f"✓ Environment created: {env_name} ({obs_type})")
 
@@ -143,12 +171,17 @@ def main():
 
     # Save videos if requested
     if args.save_video and "videos" in eval_results:
-        output_dir = Path(args.output_dir) if args.output_dir else Path(args.checkpoint).parent / "eval_videos"
+        output_dir = (
+            Path(args.output_dir)
+            if args.output_dir
+            else Path(args.checkpoint).parent / "eval_videos"
+        )
         output_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"\nSaving videos to {output_dir}...")
         try:
             import imageio
+
             for i, video_frames in enumerate(eval_results["videos"]):
                 video_path = output_dir / f"episode_{i}.mp4"
                 imageio.mimsave(video_path, video_frames, fps=args.video_fps)

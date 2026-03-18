@@ -32,6 +32,7 @@ class RobomimicDataset:
         ),
         val_ratio=0.0,
         mode="train",
+        abs_action=False,
     ):
         """Initialize dataset.
 
@@ -50,9 +51,20 @@ class RobomimicDataset:
         self.act_steps = act_steps
         self.obs_keys = obs_keys
         self.mode = mode
+        self.abs_action = abs_action
 
         # Load data from HDF5
         self._load_data(val_ratio)
+
+        # Convert actions to 6D rotation representation if abs_action
+        if self.abs_action:
+            from jax_flow.data.rotation_utils import transform_action_to_6d
+
+            self.episode_actions = [
+                transform_action_to_6d(ep_act) for ep_act in self.episode_actions
+            ]
+            self.actions = np.concatenate(self.episode_actions, axis=0)
+            self.action_dim = self.actions.shape[-1]
 
         # Compute normalizers from training data
         self.obs_normalizer = MinMaxNormalizer(self.observations)
@@ -68,9 +80,7 @@ class RobomimicDataset:
             demos = f["data"]
 
             # Get sorted demo keys
-            demo_keys = sorted(
-                demos.keys(), key=lambda k: int(k.split("_")[1])
-            )
+            demo_keys = sorted(demos.keys(), key=lambda k: int(k.split("_")[1]))
             total_demos = len(demo_keys)
 
             # Split train/val by demo
@@ -119,7 +129,9 @@ class RobomimicDataset:
 
             self.size = len(self.indices)
             self.obs_dim = self.observations.shape[-1]
-            self.action_dim = self.actions.shape[-1]
+            self.action_dim = self.actions.shape[
+                -1
+            ]  # Updated after 6D transform if abs_action
 
     def __len__(self):
         return self.size
@@ -212,6 +224,7 @@ def make_robomimic_dataset(
     mode="train",
     image_keys=None,
     lowdim_keys=None,
+    abs_action=False,
 ):
     """Factory function to create robomimic dataset.
 
@@ -239,13 +252,16 @@ def make_robomimic_dataset(
             obs_keys=obs_keys,
             val_ratio=val_ratio,
             mode=mode,
+            abs_action=abs_action,
         )
     elif obs_type == "image":
         from jax_flow.data.robomimic_image_dataset import RobomimicImageDataset
 
         # Use explicit keys if provided, otherwise infer from obs_keys
         if image_keys is None:
-            image_keys = tuple(k for k in obs_keys if "image" in k) or ("agentview_image",)
+            image_keys = tuple(k for k in obs_keys if "image" in k) or (
+                "agentview_image",
+            )
         if lowdim_keys is None:
             lowdim_keys = tuple(k for k in obs_keys if "image" not in k)
 
@@ -258,6 +274,7 @@ def make_robomimic_dataset(
             lowdim_keys=tuple(lowdim_keys),
             val_ratio=val_ratio,
             mode=mode,
+            abs_action=abs_action,
         )
     else:
         raise ValueError(f"Invalid obs_type: {obs_type}")

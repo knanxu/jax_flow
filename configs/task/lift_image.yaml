@@ -39,7 +39,8 @@ env:
   control_freq: 20
 
 # Action dimension
-act_dim: 7
+act_dim: 10
+abs_action: true
 
 # Task-specific parameters
 task_horizon: 400

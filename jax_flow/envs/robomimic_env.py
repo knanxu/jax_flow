@@ -2,33 +2,48 @@
 
 import gymnasium as gym
 import numpy as np
-from gymnasium.spaces import Box, Dict
+from gymnasium.spaces import Box
 
 # DexMimicGen environment registry: env_name -> default config
 _DUAL_ARM_OBS_KEYS = (
-    "robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos",
-    "robot1_eef_pos", "robot1_eef_quat", "robot1_gripper_qpos",
+    "robot0_eef_pos",
+    "robot0_eef_quat",
+    "robot0_gripper_qpos",
+    "robot1_eef_pos",
+    "robot1_eef_quat",
+    "robot1_gripper_qpos",
 )
 
 DEXMIMICGEN_ENVS = {
     "TwoArmThreading": {
         "obs_keys": _DUAL_ARM_OBS_KEYS,
         "lowdim_keys": _DUAL_ARM_OBS_KEYS,
-        "image_keys": ("agentview_image", "robot0_eye_in_hand_image", "robot1_eye_in_hand_image"),
+        "image_keys": (
+            "agentview_image",
+            "robot0_eye_in_hand_image",
+            "robot1_eye_in_hand_image",
+        ),
         "max_episode_steps": 400,
     },
     "TwoArmThreePieceAssembly": {
         "obs_keys": _DUAL_ARM_OBS_KEYS,
         "lowdim_keys": _DUAL_ARM_OBS_KEYS,
-        "image_keys": ("agentview_image", "robot0_eye_in_hand_image", "robot1_eye_in_hand_image"),
+        "image_keys": (
+            "agentview_image",
+            "robot0_eye_in_hand_image",
+            "robot1_eye_in_hand_image",
+        ),
         "max_episode_steps": 300,
     },
     "TwoArmTransport": {
         "obs_keys": _DUAL_ARM_OBS_KEYS,
         "lowdim_keys": _DUAL_ARM_OBS_KEYS,
         "image_keys": (
-            "agentview_image", "robot0_eye_in_hand_image", "robot1_eye_in_hand_image",
-            "shouldercamera0_image", "shouldercamera1_image",
+            "agentview_image",
+            "robot0_eye_in_hand_image",
+            "robot1_eye_in_hand_image",
+            "shouldercamera0_image",
+            "shouldercamera1_image",
         ),
         "max_episode_steps": 1200,
     },
@@ -56,6 +71,7 @@ class RobomimicWrapper(gym.Env):
         max_episode_steps=None,
         render_hw=(256, 256),
         render_camera_name="agentview",
+        abs_action=False,
     ):
         self.env = env
         self.obs_keys = obs_keys
@@ -64,6 +80,7 @@ class RobomimicWrapper(gym.Env):
         self.max_episode_steps = max_episode_steps
         self.render_hw = render_hw
         self.render_camera_name = render_camera_name
+        self.abs_action = abs_action
 
         self._seed = None
         self.t = 0
@@ -121,13 +138,21 @@ class RobomimicWrapper(gym.Env):
         else:
             raw_action = action
 
+        # Convert 10D (rot6d) back to 7D (axis_angle) for env
+        if self.abs_action:
+            from jax_flow.data.rotation_utils import undo_transform_action
+
+            raw_action = undo_transform_action(raw_action)
+
         raw_obs, reward, done, info = self.env.step(raw_action)
         obs = self._get_observation()
         self.t += 1
 
         # Check success via env.is_success() (robomimic standard)
         success = self.env.is_success()
-        is_success = success.get("task", False) if isinstance(success, dict) else bool(success)
+        is_success = (
+            success.get("task", False) if isinstance(success, dict) else bool(success)
+        )
 
         terminated = is_success
         truncated = (
@@ -161,6 +186,7 @@ class RobomimicImageWrapper(gym.Env):
         max_episode_steps=None,
         render_hw=(256, 256),
         render_camera_name="agentview",
+        abs_action=False,
     ):
         self.env = env
         self.image_keys = image_keys
@@ -170,6 +196,7 @@ class RobomimicImageWrapper(gym.Env):
         self.max_episode_steps = max_episode_steps
         self.render_hw = render_hw
         self.render_camera_name = render_camera_name
+        self.abs_action = abs_action
 
         self._seed = None
         self.t = 0
@@ -210,7 +237,7 @@ class RobomimicImageWrapper(gym.Env):
             offset = 0
             for key in self.lowdim_keys:
                 dim = raw_obs[key].shape[0]
-                obs[key] = lowdim_concat[offset:offset + dim]
+                obs[key] = lowdim_concat[offset : offset + dim]
                 offset += dim
 
         return obs
@@ -236,12 +263,20 @@ class RobomimicImageWrapper(gym.Env):
         else:
             raw_action = action
 
+        # Convert 10D (rot6d) back to 7D (axis_angle) for env
+        if self.abs_action:
+            from jax_flow.data.rotation_utils import undo_transform_action
+
+            raw_action = undo_transform_action(raw_action)
+
         raw_obs, reward, done, info = self.env.step(raw_action)
         obs = self._get_observation()
         self.t += 1
 
         success = self.env.is_success()
-        is_success = success.get("task", False) if isinstance(success, dict) else bool(success)
+        is_success = (
+            success.get("task", False) if isinstance(success, dict) else bool(success)
+        )
 
         terminated = is_success
         truncated = (
@@ -273,8 +308,12 @@ class FrameStackWrapper(gym.Wrapper):
 
         # Update observation space for array obs
         if isinstance(self.observation_space, Box):
-            low = np.repeat(self.observation_space.low[np.newaxis, ...], num_stack, axis=0)
-            high = np.repeat(self.observation_space.high[np.newaxis, ...], num_stack, axis=0)
+            low = np.repeat(
+                self.observation_space.low[np.newaxis, ...], num_stack, axis=0
+            )
+            high = np.repeat(
+                self.observation_space.high[np.newaxis, ...], num_stack, axis=0
+            )
             self.observation_space = Box(
                 low=low, high=high, dtype=self.observation_space.dtype
             )
@@ -354,20 +393,21 @@ class ActionChunkingWrapper(gym.Wrapper):
             self._action_buffer = action
             self._buffer_idx = 0
 
-        if self._action_buffer is not None and self._buffer_idx < len(self._action_buffer):
+        if self._action_buffer is not None and self._buffer_idx < len(
+            self._action_buffer
+        ):
             current_action = self._action_buffer[self._buffer_idx]
             self._buffer_idx += 1
         else:
-            current_action = action if action is not None and action.ndim == 1 else action[0]
+            current_action = (
+                action if action is not None and action.ndim == 1 else action[0]
+            )
 
         return self.env.step(current_action)
 
     def needs_replan(self):
         """Check if the policy needs to re-plan."""
-        return (
-            self._action_buffer is None
-            or self._buffer_idx >= self.act_exec_steps
-        )
+        return self._action_buffer is None or self._buffer_idx >= self.act_exec_steps
 
     def seed(self, seed=None):
         """Set random seed."""
@@ -394,6 +434,7 @@ def make_robomimic_env(
     lowdim_keys=None,
     seed=None,
     render_offscreen=None,
+    abs_action=False,
 ):
     """Factory function to create robomimic environment.
 
@@ -423,7 +464,12 @@ def make_robomimic_env(
     if env_name in DEXMIMICGEN_ENVS:
         defaults = DEXMIMICGEN_ENVS[env_name]
         # Use registry defaults for unspecified keys
-        if obs_keys == ("robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"):
+        if obs_keys == (
+            "robot0_eef_pos",
+            "robot0_eef_quat",
+            "robot0_gripper_qpos",
+            "object",
+        ):
             obs_keys = defaults["obs_keys"]
         if image_keys is None:
             image_keys = defaults["image_keys"]
@@ -436,7 +482,9 @@ def make_robomimic_env(
         try:
             import dexmimicgen  # noqa: F401
         except ImportError:
-            print("Warning: dexmimicgen not installed. Install with: pip install -e /path/to/dexmimicgen")
+            print(
+                "Warning: dexmimicgen not installed. Install with: pip install -e /path/to/dexmimicgen"
+            )
 
     # Initialize observation modality mapping
     if obs_type == "image":
@@ -454,6 +502,7 @@ def make_robomimic_env(
 
     # Fix MimicGen env names: Strip _D0/_D1/_D2 suffix (e.g. Stack_D0 -> Stack)
     import re
+
     raw_env_name = env_meta.get("env_name", "")
     stripped = re.sub(r"_D\d+$", "", raw_env_name)
     if stripped != raw_env_name:
@@ -496,6 +545,7 @@ def make_robomimic_env(
     # Patch get_observation for DexMimicGen envs (no 'object-state' key)
     if env_name in DEXMIMICGEN_ENVS:
         import robomimic.utils.obs_utils as ObsUtils
+
         _robomimic_env = env  # this is the EnvRobosuite before any wrapping
 
         def _patched_get_obs(di=None):
@@ -503,7 +553,9 @@ def make_robomimic_env(
                 di = _robomimic_env.env._get_observations(force_update=True)
             ret = {}
             for k in di:
-                if (k in ObsUtils.OBS_KEYS_TO_MODALITIES) and ObsUtils.key_is_obs_modality(key=k, obs_modality="rgb"):
+                if (
+                    k in ObsUtils.OBS_KEYS_TO_MODALITIES
+                ) and ObsUtils.key_is_obs_modality(key=k, obs_modality="rgb"):
                     ret[k] = di[k][::-1]
                     if _robomimic_env.postprocess_visual_obs:
                         ret[k] = ObsUtils.process_obs(obs=ret[k], obs_key=k)
@@ -513,7 +565,11 @@ def make_robomimic_env(
             for robot in _robomimic_env.env.robots:
                 pf = robot.robot_model.naming_prefix
                 for k in di:
-                    if k.startswith(pf) and (k not in ret) and (not k.endswith("proprio-state")):
+                    if (
+                        k.startswith(pf)
+                        and (k not in ret)
+                        and (not k.endswith("proprio-state"))
+                    ):
                         ret[k] = np.array(di[k])
             return ret
 
@@ -528,6 +584,7 @@ def make_robomimic_env(
             action_normalizer=action_normalizer,
             lowdim_normalizer=lowdim_normalizer,
             max_episode_steps=max_episode_steps,
+            abs_action=abs_action,
         )
     else:
         env = RobomimicWrapper(
@@ -536,6 +593,7 @@ def make_robomimic_env(
             obs_normalizer=obs_normalizer,
             action_normalizer=action_normalizer,
             max_episode_steps=max_episode_steps,
+            abs_action=abs_action,
         )
 
     # Add frame stacking

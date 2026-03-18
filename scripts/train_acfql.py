@@ -18,7 +18,7 @@ from tqdm import tqdm
 
 from jax_flow.agents.offline_online.acfql_agent import ACFQLAgent
 from jax_flow.agents.offline_online.utils import reward_transform
-from jax_flow.core.checkpoint import save_checkpoint, cleanup_old_checkpoints
+from jax_flow.core.checkpoint import cleanup_old_checkpoints, save_checkpoint
 from jax_flow.core.evaluation import evaluate_policy, print_evaluation_results
 from jax_flow.data import DatasetManager, make_robomimic_dataset
 from jax_flow.data.replay_buffer import ReplayBuffer
@@ -40,9 +40,7 @@ def fill_buffer_from_dataset(dataset, buffer, chunk_length):
         for t in range(ep_len):
             obs = dataset.obs_normalizer.normalize(ep_obs[t])
             action = dataset.action_normalizer.normalize(ep_act[t])
-            next_obs = dataset.obs_normalizer.normalize(
-                ep_obs[min(t + 1, ep_len - 1)]
-            )
+            next_obs = dataset.obs_normalizer.normalize(ep_obs[min(t + 1, ep_len - 1)])
             done = t == ep_len - 1
             reward = 1.0 if done else 0.0  # Sparse reward (transformed later)
 
@@ -99,13 +97,14 @@ def main(cfg: DictConfig):
         return
 
     dataset_kwargs = {}
+    abs_action = cfg.task.get("abs_action", False)
+    if abs_action:
+        dataset_kwargs["abs_action"] = True
     if obs_type == "image":
         dataset_kwargs["image_keys"] = tuple(
             cfg.task.dataset.get("image_keys", ["agentview_image"])
         )
-        dataset_kwargs["lowdim_keys"] = tuple(
-            cfg.task.dataset.get("lowdim_keys", [])
-        )
+        dataset_kwargs["lowdim_keys"] = tuple(cfg.task.dataset.get("lowdim_keys", []))
     elif "obs_keys" in cfg.task:
         dataset_kwargs["obs_keys"] = tuple(cfg.task.obs_keys)
 
@@ -122,7 +121,9 @@ def main(cfg: DictConfig):
 
     action_dim = train_dataset.action_dim
     obs_dim = train_dataset.obs_dim
-    print(f"Dataset: {len(train_dataset)} samples, obs_dim={obs_dim}, action_dim={action_dim}")
+    print(
+        f"Dataset: {len(train_dataset)} samples, obs_dim={obs_dim}, action_dim={action_dim}"
+    )
 
     # ============================================================
     # 2. Create replay buffer and fill with offline data
@@ -150,7 +151,9 @@ def main(cfg: DictConfig):
     agent_config = {
         # Network
         "encoder_type": cfg.get("encoder_type", "identity"),
-        "encoder_hidden_dims": tuple(cfg.network.get("encoder_hidden_dims", [256, 256])),
+        "encoder_hidden_dims": tuple(
+            cfg.network.get("encoder_hidden_dims", [256, 256])
+        ),
         "emb_dim": cfg.network.emb_dim,
         "n_blocks": cfg.network.get("n_blocks", 6),
         "expansion_factor": cfg.network.get("expansion_factor", 4),
@@ -212,15 +215,19 @@ def main(cfg: DictConfig):
         env_name=cfg.task.env_name,
         dataset_path=str(resolved_path),
         obs_type=obs_type,
-        obs_keys=tuple(cfg.task.get("obs_keys", [
-            "robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"
-        ])),
+        obs_keys=tuple(
+            cfg.task.get(
+                "obs_keys",
+                ["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"],
+            )
+        ),
         obs_normalizer=normalizers.get("obs"),
         action_normalizer=normalizers.get("action"),
         max_episode_steps=cfg.eval.max_episode_steps,
         frame_stack=cfg.task.dataset.obs_steps,
         act_exec_steps=cfg.task.dataset.act_steps,
         seed=cfg.seed + 100,
+        abs_action=abs_action,
     )
 
     # ============================================================
@@ -229,6 +236,7 @@ def main(cfg: DictConfig):
     use_wandb = cfg.wandb.get("enabled", False)
     if use_wandb:
         import wandb
+
         wandb.init(
             project=cfg.wandb.project,
             entity=cfg.wandb.entity,
@@ -298,7 +306,8 @@ def main(cfg: DictConfig):
                 best_success_rate = eval_results["success_rate"]
                 save_checkpoint(
                     output_dir / "best_model.pkl",
-                    agent, step,
+                    agent,
+                    step,
                     normalizers=normalizers,
                     metadata={"phase": "offline", "success_rate": best_success_rate},
                 )
@@ -307,7 +316,9 @@ def main(cfg: DictConfig):
         if step % cfg.checkpoint.save_freq == 0:
             save_checkpoint(
                 output_dir / f"checkpoint_{step}.pkl",
-                agent, step, normalizers=normalizers,
+                agent,
+                step,
+                normalizers=normalizers,
             )
             cleanup_old_checkpoints(output_dir, cfg.checkpoint.keep_last_n)
 
@@ -325,15 +336,24 @@ def main(cfg: DictConfig):
             env_name=cfg.task.env_name,
             dataset_path=str(resolved_path),
             obs_type=obs_type,
-            obs_keys=tuple(cfg.task.get("obs_keys", [
-                "robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"
-            ])),
+            obs_keys=tuple(
+                cfg.task.get(
+                    "obs_keys",
+                    [
+                        "robot0_eef_pos",
+                        "robot0_eef_quat",
+                        "robot0_gripper_qpos",
+                        "object",
+                    ],
+                )
+            ),
             obs_normalizer=normalizers.get("obs"),
             action_normalizer=normalizers.get("action"),
             max_episode_steps=cfg.eval.max_episode_steps,
             frame_stack=cfg.task.dataset.obs_steps,
             act_exec_steps=None,  # We manage chunking manually
             seed=cfg.seed,
+            abs_action=abs_action,
         )
 
         obs, _ = online_env.reset()
@@ -351,15 +371,11 @@ def main(cfg: DictConfig):
             if len(action_queue) == 0:
                 if online_step <= algo.random_steps:
                     # Random exploration
-                    actions = np.random.uniform(
-                        -1, 1, (1, chunk_length, action_dim)
-                    )
+                    actions = np.random.uniform(-1, 1, (1, chunk_length, action_dim))
                 else:
                     obs_batch = jnp.array(obs[np.newaxis, ...])
                     sample_rng = jax.random.PRNGKey(online_step)
-                    actions = np.array(
-                        agent.sample_actions(obs_batch, rng=sample_rng)
-                    )
+                    actions = np.array(agent.sample_actions(obs_batch, rng=sample_rng))
 
                 # Queue first act_exec_steps actions
                 act_steps = cfg.task.dataset.act_steps
@@ -389,10 +405,13 @@ def main(cfg: DictConfig):
                 action_queue = []
                 episode_count += 1
                 if use_wandb:
-                    wandb.log({
-                        "online/episode_reward": episode_reward,
-                        "online/episode_count": episode_count,
-                    }, step=total_step)
+                    wandb.log(
+                        {
+                            "online/episode_reward": episode_reward,
+                            "online/episode_count": episode_count,
+                        },
+                        step=total_step,
+                    )
                 episode_reward = 0.0
 
             # Gradient updates (UTD ratio)
@@ -407,19 +426,19 @@ def main(cfg: DictConfig):
                     jax_batch = {
                         "observations": jnp.array(seq_batch["observations"]),
                         "actions": jnp.array(seq_batch["actions_long"]),
-                        "rewards": jnp.array(
-                            reward_transform(seq_batch["rewards"])
-                        ),
-                        "next_observations": jnp.array(
-                            seq_batch["next_observations"]
-                        ),
+                        "rewards": jnp.array(reward_transform(seq_batch["rewards"])),
+                        "next_observations": jnp.array(seq_batch["next_observations"]),
                         "masks": jnp.array(seq_batch["masks"]),
                         "valid": jnp.array(seq_batch["valid"]),
                     }
                     agent, update_info = agent.update(jax_batch)
 
             # Logging
-            if online_step % 1000 == 0 and use_wandb and online_step > algo.random_steps:
+            if (
+                online_step % 1000 == 0
+                and use_wandb
+                and online_step > algo.random_steps
+            ):
                 log_dict = {f"train/{k}": float(v) for k, v in update_info.items()}
                 log_dict["train/step"] = total_step
                 wandb.log(log_dict, step=total_step)
@@ -437,16 +456,20 @@ def main(cfg: DictConfig):
                 print_evaluation_results(eval_results)
 
                 if use_wandb:
-                    wandb.log({
-                        "eval/success_rate": eval_results["success_rate"],
-                        "eval/avg_return": eval_results["avg_return"],
-                    }, step=total_step)
+                    wandb.log(
+                        {
+                            "eval/success_rate": eval_results["success_rate"],
+                            "eval/avg_return": eval_results["avg_return"],
+                        },
+                        step=total_step,
+                    )
 
                 if eval_results["success_rate"] > best_success_rate:
                     best_success_rate = eval_results["success_rate"]
                     save_checkpoint(
                         output_dir / "best_model.pkl",
-                        agent, total_step,
+                        agent,
+                        total_step,
                         normalizers=normalizers,
                         metadata={
                             "phase": "online",
@@ -458,14 +481,17 @@ def main(cfg: DictConfig):
             if online_step % cfg.checkpoint.save_freq == 0:
                 save_checkpoint(
                     output_dir / f"checkpoint_{total_step}.pkl",
-                    agent, total_step, normalizers=normalizers,
+                    agent,
+                    total_step,
+                    normalizers=normalizers,
                 )
                 cleanup_old_checkpoints(output_dir, cfg.checkpoint.keep_last_n)
 
     # Final save
     save_checkpoint(
         output_dir / "final_model.pkl",
-        agent, total_step if algo.online_steps > 0 else algo.offline_steps,
+        agent,
+        total_step if algo.online_steps > 0 else algo.offline_steps,
         normalizers=normalizers,
         metadata={"best_success_rate": best_success_rate},
     )

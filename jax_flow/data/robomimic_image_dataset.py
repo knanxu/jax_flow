@@ -35,6 +35,7 @@ class RobomimicImageDataset:
         image_size=(84, 84),
         val_ratio=0.0,
         mode="train",
+        abs_action=False,
     ):
         """Initialize dataset.
 
@@ -57,9 +58,20 @@ class RobomimicImageDataset:
         self.lowdim_keys = lowdim_keys
         self.image_size = image_size
         self.mode = mode
+        self.abs_action = abs_action
 
         # Load data from HDF5
         self._load_data(val_ratio)
+
+        # Convert actions to 6D rotation representation if abs_action
+        if self.abs_action:
+            from jax_flow.data.rotation_utils import transform_action_to_6d
+
+            self.episode_actions = [
+                transform_action_to_6d(ep_act) for ep_act in self.episode_actions
+            ]
+            self.actions = np.concatenate(self.episode_actions, axis=0)
+            self.action_dim = self.actions.shape[-1]
 
         # Create normalizers
         self.image_normalizer = ImageNormalizer()
@@ -139,7 +151,9 @@ class RobomimicImageDataset:
                         self.lowdim_key_dims[lk] = dim
 
             # Compute obs_dim: sum of all lowdim key dims
-            self.obs_dim = sum(self.lowdim_key_dims.values()) if self.lowdim_key_dims else 0
+            self.obs_dim = (
+                sum(self.lowdim_key_dims.values()) if self.lowdim_key_dims else 0
+            )
 
             # Build index
             self.indices = []
@@ -193,7 +207,7 @@ class RobomimicImageDataset:
             offset = 0
             for key in self.lowdim_keys:
                 dim = self.lowdim_key_dims[key]
-                observations[key] = lowdim_obs[:, offset:offset + dim]
+                observations[key] = lowdim_obs[:, offset : offset + dim]
                 offset += dim
 
         # Sample action sequence
@@ -231,9 +245,7 @@ class RobomimicImageDataset:
         # Stack observations (dict of arrays)
         obs_dict = {}
         for key in samples[0]["observations"].keys():
-            obs_dict[key] = np.stack(
-                [s["observations"][key] for s in samples], axis=0
-            )
+            obs_dict[key] = np.stack([s["observations"][key] for s in samples], axis=0)
 
         # Stack actions
         actions = np.stack([s["actions"] for s in samples], axis=0)

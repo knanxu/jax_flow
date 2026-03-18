@@ -34,7 +34,8 @@ env:
   use_camera_obs: true
 
 # Action dimension
-act_dim: 14
+act_dim: 20
+abs_action: true
 
 # Observation keys to use
 obs_keys:

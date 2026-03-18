@@ -117,9 +117,12 @@ def main(cfg: DictConfig):
     dataset_path = str(resolved_path)
 
     is_image = cfg.task.obs_type == "image"
+    abs_action = cfg.task.get("abs_action", False)
 
     # Get image/lowdim keys from config
     dataset_kwargs = {}
+    if abs_action:
+        dataset_kwargs["abs_action"] = True
     if is_image:
         image_keys = list(cfg.task.dataset.get("image_keys", ["agentview_image"]))
         lowdim_keys = list(
@@ -268,6 +271,7 @@ def main(cfg: DictConfig):
         "dataset_path": str(resolved_path),
         "env_name": cfg.task.env_name,
         "obs_type": cfg.task.obs_type,
+        "abs_action": abs_action,
     }
 
     # Image mode: auto-set encoder and pass keys
@@ -381,6 +385,7 @@ def main(cfg: DictConfig):
                 act_exec_steps=cfg.task.dataset.act_steps,
                 seed=cfg.seed,
                 render_offscreen=cfg.eval.save_video or cfg.eval.render,
+                abs_action=abs_action,
             )
 
     pbar = tqdm(range(cfg.optimization.gradient_steps), desc="Training")
