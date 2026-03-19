@@ -51,9 +51,22 @@ def euler_sampler_with_trajectory(network, encoder, observations, num_steps, rng
     return np.array(x), np.stack(trajectory, axis=0)  # (num_steps+1, batch, horizon, action_dim)
 
 
+def _infer_task_source(config):
+    """Infer task_source from checkpoint config."""
+    task_source = config.get("task_source")
+    if task_source:
+        return task_source
+    env_name = config.get("env_name", "")
+    if env_name in ("PushT", "pusht"):
+        return "pusht"
+    if env_name in ("kitchen",):
+        return "kitchen"
+    return "robomimic"
+
+
 def load_obs_from_dataset(config, normalizers, obs_index=0):
     """Load a single observation from the dataset."""
-    task_source = config.get("task_source", "robomimic")
+    task_source = _infer_task_source(config)
     obs_steps = config.get("obs_steps", 2)
     horizon = config.get("horizon", 16)
 
@@ -87,16 +100,23 @@ def load_obs_from_dataset(config, normalizers, obs_index=0):
 
     sample = ds[obs_index]
     obs = sample["observations"]
-    obs_norm = normalizers.get("obs")
-    if obs_norm is not None:
-        obs = obs_norm.normalize(obs)
+
+    # For non-dict obs, apply normalizer and add batch dim
+    if isinstance(obs, dict):
+        # Image obs (e.g. PushT image): dataset already normalizes internally
+        obs = jax.tree_util.tree_map(lambda x: jnp.array(x)[None], obs)
+    else:
+        obs_norm = normalizers.get("obs")
+        if obs_norm is not None:
+            obs = obs_norm.normalize(obs)
+        obs = jnp.array(obs)[None]
 
     gt_action = sample["actions"]
     action_norm = normalizers.get("action")
     if action_norm is not None:
         gt_action = action_norm.normalize(gt_action)
 
-    return jnp.array(obs)[None], np.array(gt_action)
+    return obs, np.array(gt_action)
 
 
 def sample_with_trajectory(agent, obs, num_samples):
