@@ -318,6 +318,7 @@ class ACFQLAgent(flax.struct.PyTreeNode):
             flow_batch = {
                 "observations": batch["observations"],
                 "actions": actions,
+                "sample_weights": valid_flat,
             }
             bc_loss, bc_info = self.loss_fn_type(
                 network=flow_net,
@@ -349,7 +350,7 @@ class ACFQLAgent(flax.struct.PyTreeNode):
                 next_cond, next_flat, name="target_critic"
             )  # (num_qs, batch)
             target_q = aggregate_q(
-                target_q_all, self.config.get("q_agg", "min")
+                target_q_all, self.config.get("q_agg", "mean")
             )
 
             # TD target with chunk-level discount
@@ -401,12 +402,12 @@ class ACFQLAgent(flax.struct.PyTreeNode):
                     (onestep_actions - jax.lax.stop_gradient(flow_actions)) ** 2
                 )
 
-                # Q loss through one-step actor
+                # Q loss through one-step actor (no grad through critic)
                 onestep_flat = flatten_action_chunk(
                     jnp.clip(onestep_actions, -1, 1)
                 )
                 q_onestep = self.network(
-                    onestep_cond, onestep_flat, name="critic", params=params
+                    onestep_cond, onestep_flat, name="critic"
                 )
                 q_loss = -jnp.mean(aggregate_q(q_onestep, "mean"))
 
@@ -490,15 +491,24 @@ class ACFQLAgent(flax.struct.PyTreeNode):
 
         cond = self.network(observations, training=False, name="encoder", rngs={})
 
-        # Generate N action chunks
-        all_actions = []
-        for i in range(n_samples):
-            rng_i = jax.random.fold_in(rng, i)
-            acts = self._sample_flow_actions(observations, rng_i)
-            all_actions.append(acts)
+        # Generate N action chunks using vmap for efficiency
+        # Split rng into N keys
+        rngs = jax.random.split(rng, n_samples)
 
-        # Stack: (N, batch, chunk_length, action_dim)
-        all_actions = jnp.stack(all_actions, axis=0)
+        # Vectorize _sample_flow_actions over the N samples
+        # observations needs to be broadcast to (N, batch, ...)
+        obs_expanded = jax.tree_util.tree_map(
+            lambda x: jnp.broadcast_to(x[None, ...], (n_samples,) + x.shape),
+            observations
+        )
+
+        # vmap over the first axis (N samples)
+        sample_fn = jax.vmap(
+            lambda r, o: self._sample_flow_actions(o, r),
+            in_axes=(0, 0),
+            out_axes=0
+        )
+        all_actions = sample_fn(rngs, obs_expanded)  # (N, batch, chunk_length, action_dim)
 
         # Evaluate Q for each candidate
         # Expand cond: (batch, cond_dim) -> (N, batch, cond_dim)

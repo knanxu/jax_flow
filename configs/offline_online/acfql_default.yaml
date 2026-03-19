@@ -32,7 +32,7 @@ algorithm:
 
   # Critic
   num_qs: 2                # Q-function ensemble size
-  q_agg: min               # Target Q aggregation: "min" or "mean"
+  q_agg: mean              # Target Q aggregation: "min" or "mean" (qc default: mean)
   value_hidden_dims: [512, 512, 512, 512]
   critic_layer_norm: true
 

@@ -224,8 +224,8 @@ def main(cfg: DictConfig):
         obs_normalizer=normalizers.get("obs"),
         action_normalizer=normalizers.get("action"),
         max_episode_steps=cfg.eval.max_episode_steps,
-        frame_stack=cfg.task.dataset.obs_steps,
-        act_exec_steps=cfg.task.dataset.act_steps,
+        frame_stack=None,  # ACFQL uses single-frame obs
+        act_exec_steps=chunk_length,  # Execute all chunk_length actions
         seed=cfg.seed + 100,
         abs_action=abs_action,
     )
@@ -351,7 +351,7 @@ def main(cfg: DictConfig):
             obs_normalizer=normalizers.get("obs"),
             action_normalizer=normalizers.get("action"),
             max_episode_steps=cfg.eval.max_episode_steps,
-            frame_stack=cfg.task.dataset.obs_steps,
+            frame_stack=None,  # ACFQL uses single-frame obs
             act_exec_steps=None,  # We manage chunking manually
             seed=cfg.seed,
             abs_action=abs_action,
@@ -374,13 +374,13 @@ def main(cfg: DictConfig):
                     # Random exploration
                     actions = np.random.uniform(-1, 1, (1, chunk_length, action_dim))
                 else:
+                    # obs is single-frame (obs_dim,), add batch dim
                     obs_batch = jnp.array(obs[np.newaxis, ...])
                     sample_rng = jax.random.PRNGKey(online_step)
                     actions = np.array(agent.sample_actions(obs_batch, rng=sample_rng))
 
-                # Queue first act_exec_steps actions
-                act_steps = cfg.task.dataset.act_steps
-                chunk = actions[0, :act_steps]
+                # Queue all chunk_length actions (execute all)
+                chunk = actions[0]  # (chunk_length, action_dim)
                 action_queue = list(chunk)
 
             action = action_queue.pop(0)
