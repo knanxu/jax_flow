@@ -101,22 +101,16 @@ def load_obs_from_dataset(config, normalizers, obs_index=0):
     sample = ds[obs_index]
     obs = sample["observations"]
 
-    # For non-dict obs, apply normalizer and add batch dim
+    # Dataset __getitem__ already normalizes obs and actions internally,
+    # so do NOT apply normalizer again here.
     if isinstance(obs, dict):
-        # Image obs (e.g. PushT image): dataset already normalizes internally
         obs = jax.tree_util.tree_map(lambda x: jnp.array(x)[None], obs)
     else:
-        obs_norm = normalizers.get("obs")
-        if obs_norm is not None:
-            obs = obs_norm.normalize(obs)
         obs = jnp.array(obs)[None]
 
-    gt_action = sample["actions"]
-    action_norm = normalizers.get("action")
-    if action_norm is not None:
-        gt_action = action_norm.normalize(gt_action)
+    gt_action = np.array(sample["actions"])  # already normalized by dataset
 
-    return obs, np.array(gt_action)
+    return obs, gt_action
 
 
 def sample_with_trajectory(agent, obs, num_samples):
