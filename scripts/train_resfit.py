@@ -721,6 +721,7 @@ def main(cfg: DictConfig):
                         "eval/success_rate": eval_results["success_rate"],
                         "eval/avg_length": eval_results["avg_length"],
                         "eval/avg_return": eval_results["avg_return"],
+                        "eval/mean_score": eval_results["mean_score"],
                     },
                     step=global_step,
                 )

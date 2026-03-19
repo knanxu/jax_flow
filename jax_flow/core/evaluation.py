@@ -11,12 +11,17 @@ def rollout_episode(
     max_steps: int = 500,
     render: bool = False,
     save_video: bool = False,
+    seed: int | None = None,
 ) -> dict[str, Any]:
     """Rollout a single episode."""
-    obs, info = env.reset()
+    if seed is not None:
+        obs, info = env.reset(seed=seed)
+    else:
+        obs, info = env.reset()
     done = False
     episode_length = 0
     episode_return = 0.0
+    max_reward = 0.0
     success = False
     result_num_completed = 0
     frames = [] if save_video else None
@@ -43,9 +48,10 @@ def rollout_episode(
         done = terminated or truncated
         episode_length += 1
         episode_return += reward
+        max_reward = max(max_reward, float(reward))
 
-        if "success" in info:
-            success = bool(info["success"])
+        if "success" in info and bool(info["success"]):
+            success = True
 
         # Track Kitchen completed tasks (highest seen during episode)
         if "num_completed" in info:
@@ -64,6 +70,7 @@ def rollout_episode(
         "length": episode_length,
         "return": episode_return,
         "success": success,
+        "max_reward": max_reward,
     }
 
     if result_num_completed > 0:
@@ -96,6 +103,7 @@ def evaluate_policy(
     episode_lengths = []
     episode_returns = []
     successes = []
+    max_rewards = []
     num_completed_list = []
     videos = []
     action_means = []
@@ -112,11 +120,13 @@ def evaluate_policy(
             max_steps=max_steps,
             render=render,
             save_video=save_this_video,
+            seed=i,
         )
 
         episode_lengths.append(result["length"])
         episode_returns.append(result["return"])
         successes.append(result["success"])
+        max_rewards.append(result["max_reward"])
 
         if "num_completed" in result:
             num_completed_list.append(result["num_completed"])
@@ -144,6 +154,7 @@ def evaluate_policy(
         "std_length": float(np.std(episode_lengths)),
         "avg_return": float(np.mean(episode_returns)),
         "std_return": float(np.std(episode_returns)),
+        "mean_score": float(np.mean(max_rewards)),
         "episode_lengths": episode_lengths,
         "episode_returns": episode_returns,
         "successes": successes,
@@ -182,6 +193,8 @@ def print_evaluation_results(results: dict[str, Any]):
         f"Avg Episode Length: {results['avg_length']:.1f} ± {results['std_length']:.1f}"
     )
     print(f"Avg Return: {results['avg_return']:.2f} ± {results['std_return']:.2f}")
+    if "mean_score" in results:
+        print(f"Mean Score: {results['mean_score']:.4f}")
     if "action_mean" in results:
         print(
             f"Action stats: mean={results['action_mean']:.3f}, std={results['action_std']:.3f}, "

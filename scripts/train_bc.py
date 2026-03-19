@@ -543,6 +543,7 @@ def main(cfg: DictConfig):
                     "eval/std_length": eval_results["std_length"],
                     "eval/avg_return": eval_results["avg_return"],
                     "eval/std_return": eval_results["std_return"],
+                    "eval/mean_score": eval_results["mean_score"],
                 }
                 if "action_mean" in eval_results:
                     eval_log["eval/action_mean"] = eval_results["action_mean"]
