@@ -340,6 +340,7 @@ def main(cfg: DictConfig):
     print("=" * 80)
 
     best_val_loss = float("inf")
+    best_success_rate = -1.0
     train_losses = []
     eval_count = 0
 
@@ -501,11 +502,11 @@ def main(cfg: DictConfig):
                     step=step,
                 )
 
-            # Save best model
+            # Track best val loss (but save to separate file)
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
-                checkpoint_path = output_dir / "best_model.pkl"
-                print(f"Saving best model to {checkpoint_path}")
+                checkpoint_path = output_dir / "best_val_loss_model.pkl"
+                print(f"New best val loss: {avg_val_loss:.4f} — saving to {checkpoint_path}")
                 save_checkpoint(
                     checkpoint_path=checkpoint_path,
                     agent=agent,
@@ -580,6 +581,22 @@ def main(cfg: DictConfig):
                             },
                             step=step,
                         )
+
+            # Save best model based on eval success_rate (or mean_score)
+            eval_score = eval_results["success_rate"]
+            if eval_score > best_success_rate:
+                best_success_rate = eval_score
+                best_checkpoint_path = output_dir / "best_model.pkl"
+                print(f"New best success rate: {eval_score:.2%} — saving to {best_checkpoint_path}")
+                save_checkpoint(
+                    checkpoint_path=best_checkpoint_path,
+                    agent=agent,
+                    step=step,
+                    normalizers=normalizers,
+                    best_val_loss=float(best_val_loss)
+                    if best_val_loss != float("inf")
+                    else None,
+                )
 
         # Save checkpoint
         if step % cfg.checkpoint.save_freq == 0 and step > 0:
