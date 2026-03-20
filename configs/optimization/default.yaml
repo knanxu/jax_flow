@@ -19,7 +19,7 @@ lr_schedule:
   min_lr: 0.0
 
 # Training parameters
-batch_size: 1024
+batch_size: 64
 gradient_steps: 300000
 grad_clip_norm: 10.0
 

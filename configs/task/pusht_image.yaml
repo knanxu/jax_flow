@@ -24,6 +24,10 @@ dataset:
   lowdim_keys:
     - agent_pos
 
+  # Random crop (96x96 -> 76x76, matching Diffusion Policy)
+  image_size: [96, 96]
+  crop_shape: [76, 76]
+
 # Environment configuration
 env:
   max_episode_steps: 300

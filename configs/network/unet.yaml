@@ -3,8 +3,8 @@
 name: unet
 network_type: unet
 
-# Architecture parameters
-model_dim: 256
+# Architecture parameters (aligned with Diffusion Policy: down_dims=[512, 1024, 2048])
+model_dim: 512
 emb_dim: 256
 dim_mult: [1, 2, 4]
 kernel_size: 5

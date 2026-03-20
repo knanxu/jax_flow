@@ -432,7 +432,7 @@ def main(cfg: DictConfig):
             print(f"\n[Step {step}] Running validation...")
 
             val_losses = []
-            for _ in range(min(100, len(val_dataset) // cfg.optimization.batch_size)):
+            for _ in range(max(1, min(100, len(val_dataset) // cfg.optimization.batch_size))):
                 # Sample once, use both obs and actions from same batch
                 val_sample = val_dataset.sample_batch(cfg.optimization.batch_size)
                 val_obs = val_sample["observations"]

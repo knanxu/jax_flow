@@ -17,7 +17,7 @@ sampler:
 # Loss computation
 loss:
   norm_type: l2       # l2 or l1
-  scale: 0.1          # Loss scale factor
+  scale: 1.0          # Loss scale factor
 
 # Training specific
 use_ema: true         # Use EMA for target network
