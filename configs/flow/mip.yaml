@@ -19,4 +19,4 @@ t_two_step: 0.9
 # Loss computation
 loss:
   norm_type: l2
-  scale: 0.1
+  scale: 1.0

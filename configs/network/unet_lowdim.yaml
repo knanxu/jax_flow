@@ -1,0 +1,15 @@
+# UNet1D network configuration for lowdim tasks
+# Smaller capacity than image UNet, matching Diffusion Policy lowdim: down_dims=[256, 512, 1024]
+
+name: unet
+network_type: unet
+
+# Architecture parameters (Diffusion Policy lowdim: down_dims=[256, 512, 1024])
+model_dim: 256
+emb_dim: 256
+dim_mult: [1, 2, 4]
+kernel_size: 5
+n_groups: 8
+
+# FiLM conditioning
+cond_predict_scale: true

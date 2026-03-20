@@ -1,4 +1,5 @@
-# Default optimization configuration
+# Default optimization configuration (image tasks)
+# For lowdim tasks, override: optimization.batch_size=256
 
 # Learning rate
 lr: 1e-4
