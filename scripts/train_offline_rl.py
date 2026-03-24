@@ -29,7 +29,7 @@ from jax_flow.envs import make_env, make_robomimic_env
 
 
 @hydra.main(
-    version_base=None, config_path="../configs/offline_rl", config_name="default"
+    version_base=None, config_path="../configs", config_name="offline_rl/default"
 )
 def main(cfg: DictConfig):
     """Main offline RL training function."""
