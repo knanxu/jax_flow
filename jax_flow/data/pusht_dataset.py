@@ -306,3 +306,149 @@ class PushTDataset:
                 "obs": self.obs_normalizer,
                 "action": self.action_normalizer,
             }
+
+    def sample_sequence(self, batch_size, discount=0.99, rng=None, reward_offset=0.0):
+        """Sample action-chunk sequences for offline RL training.
+
+        Push-T uses sparse terminal reward: reward=1 at episode end, 0 elsewhere.
+        Combined with reward_offset, this gives {reward_offset, 1+reward_offset}.
+
+        Args:
+            batch_size: Number of sequences to sample.
+            discount: Discount factor for cumulative reward.
+            rng: NumPy random generator (optional).
+            reward_offset: Added to raw rewards (e.g. -1.0 for DSRL style).
+
+        Returns:
+            dict with keys matching RobomimicDataset.sample_sequence.
+        """
+        if rng is None:
+            rng = np.random.default_rng()
+
+        # Determine episode data source based on obs_type
+        if self.obs_type == "image":
+            ep_data = self.episode_images
+        else:
+            ep_data = self.episode_obs
+
+        num_episodes = len(ep_data)
+        ep_lengths = np.array([len(ep) for ep in self.episode_actions])
+        valid_starts = np.maximum(ep_lengths - self.horizon, 0)
+        weights = valid_starts.astype(np.float64)
+        total_weight = weights.sum()
+        if total_weight == 0:
+            raise ValueError(
+                f"No episode long enough for horizon={self.horizon}. "
+                f"Max episode length: {ep_lengths.max()}"
+            )
+        weights /= total_weight
+
+        ep_indices = rng.choice(num_episodes, size=batch_size, p=weights)
+
+        obs_batch = []
+        act_batch = []
+        rew_batch = []
+        next_obs_batch = []
+        mask_batch = []
+
+        discount_powers = discount ** np.arange(self.horizon)
+
+        for ep_idx in ep_indices:
+            ep_act = self.episode_actions[ep_idx]
+            ep_len = len(ep_act)
+
+            max_start = ep_len - self.horizon
+            t = rng.integers(0, max_start + 1)
+
+            # --- Observations ---
+            obs = self._build_obs_for_rl(ep_idx, t)
+
+            # --- Actions ---
+            actions = ep_act[t : t + self.horizon]
+
+            # --- Rewards: sparse terminal reward ---
+            rewards = np.zeros(self.horizon, dtype=np.float32)
+            for i in range(self.horizon):
+                if t + i == ep_len - 1:
+                    rewards[i] = 1.0
+            rewards = rewards + reward_offset
+            cum_reward = np.sum(rewards * discount_powers)
+
+            # --- Next observations ---
+            last_t = t + self.horizon - 1
+            # next_obs uses last_t+1 if available, else last_t
+            next_t = min(last_t + 1, ep_len - 1)
+            next_obs = self._build_obs_for_rl(ep_idx, next_t)
+
+            # --- Mask: 0 if episode ends within chunk ---
+            mask = 1.0 if (t + self.horizon - 1) < (ep_len - 1) else 0.0
+
+            obs_batch.append(obs)
+            act_batch.append(actions)
+            rew_batch.append(cum_reward)
+            next_obs_batch.append(next_obs)
+            mask_batch.append(mask)
+
+        # Stack and normalize
+        act_array = np.stack(act_batch, axis=0)
+        if self.action_normalizer is not None:
+            act_array = self.action_normalizer.normalize(act_array)
+
+        if self.obs_type == "image":
+            observations = {
+                "image": np.stack([o["image"] for o in obs_batch], axis=0),
+                "agent_pos": np.stack([o["agent_pos"] for o in obs_batch], axis=0),
+            }
+            next_observations = {
+                "image": np.stack([o["image"] for o in next_obs_batch], axis=0),
+                "agent_pos": np.stack([o["agent_pos"] for o in next_obs_batch], axis=0),
+            }
+        else:
+            obs_array = np.stack(obs_batch, axis=0)
+            next_obs_array = np.stack(next_obs_batch, axis=0)
+            if self.obs_normalizer is not None:
+                obs_array = self.obs_normalizer.normalize(obs_array)
+                next_obs_array = self.obs_normalizer.normalize(next_obs_array)
+            observations = obs_array
+            next_observations = next_obs_array
+
+        return {
+            "observations": observations,
+            "actions": act_array,
+            "rewards": np.array(rew_batch, dtype=np.float32),
+            "next_observations": next_observations,
+            "masks": np.array(mask_batch, dtype=np.float32),
+        }
+
+    def _build_obs_for_rl(self, ep_idx, t):
+        """Build obs_steps observation history at timestep t for RL sampling."""
+        if self.obs_type == "image":
+            ep_img = self.episode_images[ep_idx]
+            ep_agent_pos = self.episode_agent_pos[ep_idx]
+            ep_len = len(ep_img)
+
+            img_list = []
+            pos_list = []
+            for i in range(self.obs_steps):
+                obs_t = max(t - (self.obs_steps - 1 - i), 0)
+                obs_t = min(obs_t, ep_len - 1)
+                img_list.append(ep_img[obs_t])
+                pos_list.append(ep_agent_pos[obs_t])
+
+            images = np.stack(img_list, axis=0) / 255.0
+            agent_pos = np.stack(pos_list, axis=0)
+            if self.lowdim_normalizer is not None:
+                agent_pos = self.lowdim_normalizer.normalize(agent_pos)
+
+            return {"image": images, "agent_pos": agent_pos}
+        else:
+            ep_obs = self.episode_obs[ep_idx]
+            ep_len = len(ep_obs)
+
+            obs_list = []
+            for i in range(self.obs_steps):
+                obs_t = max(t - (self.obs_steps - 1 - i), 0)
+                obs_t = min(obs_t, ep_len - 1)
+                obs_list.append(ep_obs[obs_t])
+
+            return np.stack(obs_list, axis=0)
