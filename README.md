@@ -241,6 +241,103 @@ python scripts/train_dqc.py --config-name dqc_default task=square_lowdim
 python scripts/train_dqc.py --config-name dqc_default task=square_lowdim algorithm.backup_horizon=25 algorithm.policy_chunk_size=5
 ```
 
+### Offline RL (DDPG + BC)
+
+在离线数据集上联合训练 flow policy（actor）和 critic。算法核心：`actor_loss = q_weight * q_loss + alpha * bc_loss`，其中 BC loss 作用于完整 action chunk（horizon 步），Q loss 作用于实际执行的前 `act_exec_steps` 步。
+
+**前置条件**：需要一个 BC checkpoint 来读取网络架构配置（encoder type、network type、hidden dims 等）。默认不加载预训练权重，所有参数随机初始化。
+
+```bash
+# 先训练一个 BC（仅用于获取网络架构配置）
+python scripts/train_bc.py task=square_lowdim flow=mip
+# 产出: checkpoints/square_lowdim_mip_mlp/best_model.pkl
+```
+
+#### 模式 1：BC warmup → Offline RL
+
+先用纯 BC loss 训练 encoder + flow + critic（`q_weight=0`），warmup 结束后加入 Q loss（`q_weight=1.0`）。warmup 阶段 critic 也在同步训练（通过 critic_loss），这样切换到 RL 阶段时 critic 已经有了合理的 Q 值估计。
+
+```bash
+# Lowdim: 前 100k 步纯 BC，之后加入 Q loss
+python scripts/train_offline_rl.py task=square_lowdim \
+    algorithm.bc_checkpoint=checkpoints/square_lowdim_mip_mlp/best_model.pkl \
+    algorithm.bc_warmup_steps=100000 \
+    algorithm.freeze_encoder=false
+
+# Image: Push-T
+python scripts/train_offline_rl.py task=pusht_image \
+    algorithm.bc_checkpoint=checkpoints/pusht_image_mip_unet/best_model.pkl \
+    algorithm.bc_warmup_steps=50000 \
+    algorithm.freeze_encoder=false
+```
+
+#### 模式 2：直接 Offline RL（无 warmup）
+
+从第 0 步开始 BC loss 和 Q loss 同时作用。
+
+```bash
+python scripts/train_offline_rl.py task=square_lowdim \
+    algorithm.bc_checkpoint=checkpoints/square_lowdim_mip_mlp/best_model.pkl \
+    algorithm.bc_warmup_steps=0
+```
+
+#### 关键配置项
+
+配置文件：`configs/offline_rl/default.yaml`
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `bc_checkpoint` | null | BC checkpoint 路径（必填，用于读取网络架构） |
+| `load_bc_weights` | false | 是否加载 BC 预训练权重初始化 encoder/flow |
+| `freeze_encoder` | true | 是否冻结 encoder（false 时 encoder 参与 BC loss 更新） |
+| `bc_warmup_steps` | 0 | BC warmup 步数（0=直接 RL，>0=先 BC 再 RL） |
+| `q_weight` | 1.0 | Q loss 权重（warmup 阶段自动设为 0） |
+| `alpha` | 1.0 | BC loss 权重 |
+| `actor_lr` | 1e-4 | Flow policy 学习率（和 BC 一致） |
+| `critic_lr` | 3e-4 | Critic 学习率 |
+| `critic_hidden_dims` | [2048,2048,2048] | Critic 隐藏层（DSRL 风格） |
+| `reward_offset` | -1.0 | 奖励偏移（DSRL 风格：{0,1} → {-1,0}） |
+| `normalize_q_loss` | true | Q loss 归一化（MeanFlowQL 风格） |
+| `gradient_steps` | 500000 | 总训练步数 |
+
+#### 训练流程
+
+```
+dataset.sample_sequence() → {obs(B,obs_steps,D), actions(B,horizon,A), rewards, next_obs, masks}
+                                         ↓
+                   ┌──────────── total_loss ────────────┐
+                   │                                     │
+             critic_loss                            actor_loss
+         Q(s,a) vs target_Q               q_weight * q_loss + alpha * bc_loss
+                   │                                     │
+          更新 critic 参数                         更新 flow 参数
+                   │                             (encoder 可选冻结)
+          target_critic EMA                     flow EMA (用于 eval)
+```
+
+#### 更多示例
+
+```bash
+# 加载 BC 预训练权重（而非随机初始化）
+python scripts/train_offline_rl.py task=square_lowdim \
+    algorithm.bc_checkpoint=path/to/bc.pkl \
+    algorithm.load_bc_weights=true \
+    algorithm.freeze_encoder=true
+
+# 调整 loss 权重
+python scripts/train_offline_rl.py task=square_lowdim \
+    algorithm.bc_checkpoint=path/to/bc.pkl \
+    algorithm.alpha=0.5 \
+    algorithm.q_weight=2.0
+
+# 禁用 W&B + 调整 eval 频率
+python scripts/train_offline_rl.py task=square_lowdim \
+    algorithm.bc_checkpoint=path/to/bc.pkl \
+    algorithm.bc_warmup_steps=100000 \
+    wandb.enabled=false \
+    eval.eval_interval=50000
+```
+
 ## Evaluation
 
 ```bash

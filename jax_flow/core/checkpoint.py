@@ -208,3 +208,62 @@ def load_resfit_checkpoint(checkpoint_path: Union[str, Path]) -> Dict[str, Any]:
         Checkpoint dict with encoder/actor/critic params, targets, config, etc.
     """
     return load_checkpoint(checkpoint_path)
+
+
+def save_offline_rl_checkpoint(
+    checkpoint_path: Union[str, Path],
+    agent: Any,
+    step: int,
+    bc_checkpoint_path: str = "",
+    normalizers: Optional[Dict[str, Any]] = None,
+    best_success_rate: Optional[float] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+):
+    """Save offline RL checkpoint (single ModuleDict TrainState).
+
+    Args:
+        checkpoint_path: Path to save checkpoint.
+        agent: OfflineRLAgent instance.
+        step: Current training step.
+        bc_checkpoint_path: Path to BC checkpoint (for restoring network structure).
+        normalizers: Dict of normalizers.
+        best_success_rate: Best evaluation success rate so far.
+        metadata: Additional metadata.
+    """
+    checkpoint_path = Path(checkpoint_path) if isinstance(checkpoint_path, str) else checkpoint_path
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+    checkpoint = {
+        "params": agent.network.params,
+        "opt_state": agent.network.opt_state,
+        "step": agent.network.step,
+        "config": agent.config,
+        "rng": agent.rng,
+        "ema_params": agent.ema_params,
+        "training_step": step,
+        "bc_checkpoint_path": bc_checkpoint_path,
+    }
+
+    if normalizers is not None:
+        checkpoint["normalizers"] = normalizers
+    if best_success_rate is not None:
+        checkpoint["best_success_rate"] = best_success_rate
+    if metadata is not None:
+        checkpoint["metadata"] = metadata
+
+    with open(checkpoint_path, "wb") as f:
+        pickle.dump(checkpoint, f)
+
+    print(f"✓ Offline RL checkpoint saved to {checkpoint_path}")
+
+
+def load_offline_rl_checkpoint(checkpoint_path: Union[str, Path]) -> Dict[str, Any]:
+    """Load offline RL checkpoint from disk.
+
+    Args:
+        checkpoint_path: Path to checkpoint file.
+
+    Returns:
+        Checkpoint dict with params, ema_params, config, bc_checkpoint_path, etc.
+    """
+    return load_checkpoint(checkpoint_path)

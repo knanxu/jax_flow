@@ -153,11 +153,38 @@ def make_param_labels(params):
     )
 
 
+def make_offline_rl_param_labels(params, freeze_encoder=True):
+    """Generate parameter label tree for offline RL optax.multi_transform.
+
+    Labels:
+    - 'modules_encoder' subtree -> 'frozen' or 'actor' (controlled by freeze_encoder)
+    - 'modules_target_critic' subtree -> 'frozen' (EMA only)
+    - 'modules_flow' subtree -> 'actor' (actor_lr)
+    - 'modules_critic' subtree -> 'critic' (critic_lr)
+    """
+    encoder_label = "frozen" if freeze_encoder else "actor"
+
+    def label_fn(path, _):
+        key_str = "/".join(str(getattr(k, "key", "")) for k in path)
+        if "modules_encoder" in key_str:
+            return encoder_label
+        elif "modules_target_critic" in key_str:
+            return "frozen"
+        elif "modules_flow" in key_str:
+            return "actor"
+        elif "modules_critic" in key_str:
+            return "critic"
+        return "actor"  # fallback
+
+    return jax.tree_util.tree_map_with_path(label_fn, params)
+
+
 __all__ = [
     "get_activation",
     "create_learning_rate_schedule",
     "create_optimizer",
     "make_param_labels",
+    "make_offline_rl_param_labels",
     "at_least_ndim",
     "get_batch_size",
 ]

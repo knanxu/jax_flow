@@ -1,0 +1,82 @@
+defaults:
+  - /task: square_lowdim
+  - /network: mlp
+  - /flow: mip
+  - /optimization: default
+  - _self_
+
+# Random seed
+seed: 42
+
+# Logging
+project_name: jax_flow
+experiment_name: offline_rl_${task.name}_${flow.name}_${network.name}
+log_dir: logs
+checkpoint_dir: checkpoints
+
+algorithm:
+  name: offline_rl
+  # BC checkpoint path (for network architecture config)
+  bc_checkpoint: null
+  load_bc_weights: false  # true = init encoder/flow from BC checkpoint weights
+
+  # Encoder
+  freeze_encoder: true    # false = encoder updated by BC loss (same as BC agent)
+
+  # Critic (DSRL style: large network + tanh activation)
+  critic_hidden_dims: [2048, 2048, 2048]
+  critic_activation: tanh
+  critic_layer_norm: true
+  num_ensembles: 2
+
+  # Target network
+  tau: 0.005
+  discount: 0.99
+
+  # Loss weights
+  alpha: 1.0              # BC loss weight
+  q_weight: 1.0           # Q loss weight (0 = pure BC, no RL signal)
+  normalize_q_loss: true  # MeanFlowQL style normalization
+
+  # Reward
+  reward_offset: -1.0     # DSRL style: {0,1} -> {-1,0}
+
+  # Learning rates — match BC's 1e-4 for actor, keep critic at 3e-4
+  actor_lr: 1e-4
+  critic_lr: 3e-4
+
+  # EMA
+  ema_decay: 0.995
+
+  # Training
+  gradient_steps: 500000
+  bc_warmup_steps: 0     # 0 = no warmup (mode 2), >0 = BC warmup then RL (mode 1)
+  batch_size: 256
+  log_interval: 1000
+
+# Evaluation
+eval:
+  num_episodes: 50
+  eval_interval: 10000
+  render: false
+  save_video: true
+  num_videos: 3
+  video_fps: 30
+
+# Checkpointing
+checkpoint:
+  save_freq: 50000
+  keep_last_n: 3
+
+# Weights & Biases
+wandb:
+  enabled: true
+  entity: null
+  project: ${project_name}
+  name: ${experiment_name}_seed${seed}
+  tags:
+    - ${task.name}
+    - ${flow.name}
+    - offline_rl
+  log_videos: true
+  log_video_interval: 1

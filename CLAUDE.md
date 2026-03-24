@@ -72,6 +72,10 @@ python scripts/train_acfql.py --config-name acfql_default task=square_lowdim alg
 python scripts/train_dqc.py --config-name dqc_default task=square_lowdim
 python scripts/train_dqc.py --config-name dqc_default task=square_lowdim algorithm.backup_horizon=25 algorithm.policy_chunk_size=5
 
+# Offline RL: DDPG + BC on flow policy
+# 详见下方 "Offline RL Training" 章节
+python scripts/train_offline_rl.py task=square_lowdim algorithm.bc_checkpoint=path/to/bc/best_model.pkl
+
 # Push-T: state/keypoint/image observations
 python scripts/train_bc.py task=pusht_state
 python scripts/train_bc.py task=pusht_keypoint
@@ -164,6 +168,7 @@ pyright jax_flow/
 2. **Agents** (`jax_flow/agents/`)
    - `BCAgent`: Flow matching BC, immutable PyTreeNode。图像任务使用 GroupNorm ResNet18（从头训练，统一 LR，对齐 Diffusion Policy）
    - `ResFiTAgent`: Residual RL fine-tuning (TD3 + RED-Q + 残差动作), 3 独立 TrainState
+   - `OfflineRLAgent`: Offline RL (DDPG + BC constraint)，单 ModuleDict TrainState + multi_transform optimizer，冻结 encoder，联合优化 flow policy (Q loss + BC loss) + critic
    - `ACFQLAgent`: Offline-to-online RL (待完善)
    - Pattern: `create()` → `update(batch)` → `sample_actions(obs)`
 
@@ -185,8 +190,8 @@ pyright jax_flow/
    - `encoders/`: ResNet18Encoder (GroupNorm, 完整 layer1-4), SpatialSoftmax, MultiImageEncoder, MinViTEncoder, RandomShiftsAug
 
 5. **Data** (`jax_flow/data/`)
-   - `robomimic_dataset.py`: Lowdim HDF5 dataset, per-episode 存储 + 全局索引
-   - `robomimic_image_dataset.py`: Image HDF5 dataset, 支持多相机 + lowdim 混合
+   - `robomimic_dataset.py`: Lowdim HDF5 dataset, per-episode 存储 + 全局索引。支持 `sample_sequence()` 用于离线 RL（加载 rewards/dones/next_obs，per-episode 采样不跨 episode，可配置 reward_offset）
+   - `robomimic_image_dataset.py`: Image HDF5 dataset, 支持多相机 + lowdim 混合。同样支持 `sample_sequence()` 用于离线 RL
    - `rotation_utils.py`: axis_angle ↔ rotation_6d 转换，`transform_action_to_6d` / `undo_transform_action` 支持单臂(7↔10D)和双臂(14↔20D)
    - `pusht_dataset.py`: Push-T zarr 数据集，支持 state/keypoint/image 三种 obs type，HuggingFace 自动下载
    - `kitchen_dataset.py`: Kitchen MJL 二进制日志数据集，60D obs + 9D action，HuggingFace 自动下载
@@ -252,56 +257,6 @@ configs/
 ├── flow/meanflow.yaml       # interp=linear, sampler=euler
 └── optimization/default.yaml # lr=1e-4, batch_size=256, steps=300k
 ```
-
-## Implementation Roadmap
-
-**Phase 1: Foundation** (✅ Completed)
-- [x] TrainState, ModuleDict, config system
-- [x] Data loading (lowdim + image), normalizers
-- [x] Environment wrappers (lowdim + image + action chunking)
-- [x] Frame stacking
-
-**Phase 2: Flow Matching + Networks** (✅ Completed)
-- [x] Interpolant (linear, trig)
-- [x] Losses (flow_loss, mip_loss, mf_loss placeholder)
-- [x] Samplers (Euler, Heun, MIP)
-- [x] MLP network with horizon support
-- [x] Timestep embeddings (Fourier, Learned)
-- [x] Image encoders (ResNet18 + SpatialSoftmax + MultiImage)
-
-**Phase 3: BC Agent + Training** (✅ Completed)
-- [x] BCAgent (create, update, sample_actions)
-- [x] Training script (scripts/train_bc.py)
-- [x] Data download script
-
-**Phase 4: 验证与调试** (✅ Completed)
-- [x] 数据集管理系统（自动下载 + 路径解析）
-- [x] Image 数据集生成脚本
-- [x] Square lowdim 端到端训练验证
-- [x] Square image 端到端训练验证
-- [x] Evaluation script (rollout + success rate)
-- [x] Checkpoint save/load (pickle format)
-- [x] W&B logging 集成（训练 + eval + 视频上传）
-
-**Phase 5: ACFQL + Extensions**
-- [x] MimicGen 数据集下载+转换支持（`download_mimicgen.py`, `convert_mimicgen.py`）
-- [x] DatasetManager 适配 MimicGen 路径结构，自动检测数据源
-- [x] robomimic_env 兼容 MimicGen 的 env_name 和 controller 格式
-- [x] DexMimicGen Panda 双臂任务集成（3 任务 × lowdim/image，DEXMIMICGEN_ENVS 注册表自动推断 obs keys）
-- [ ] 完善 ACFQLAgent
-- [ ] MeanFlow 完整实现 (JVP)
-- [ ] UNet / Transformer networks
-- [ ] 图像数据增强 (random crop, color jitter)
-
-**Phase 6: ResFiT RL Fine-Tuning** (✅ Completed)
-- [x] ReplayBuffer (NumPy 环形 buffer + N-step returns + dict obs)
-- [x] RandomShiftsAug (DrQ 风格随机平移增强)
-- [x] ResidualActor 添加 `add_exploration_noise()`
-- [x] ResidualEnvWrapper (内嵌冻结 BC + action queue 管理)
-- [x] ResFiTAgent (3 独立 TrainState + RED-Q + TD3)
-- [x] Checkpoint 扩展 (`save/load_resfit_checkpoint`)
-- [x] 训练脚本 `scripts/train_resfit.py` + 配置 `configs/resfit/`
-- [ ] 端到端训练验证（需要 BC checkpoint）
 
 ## References
 
