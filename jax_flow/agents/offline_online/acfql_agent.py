@@ -115,7 +115,7 @@ class ACFQLAgent(flax.struct.PyTreeNode):
                 kernel_size=config.get("kernel_size", 5),
                 n_groups=config.get("n_groups", 8),
                 cond_predict_scale=config.get("cond_predict_scale", True),
-                dim_mult=tuple(config.get("dim_mult", (1, 2, 2))),
+                dim_mult=tuple(config.get("dim_mult", (1, 2, 4))),
             )
         elif network_type == "transformer":
             flow_def = TransformerForFlow(

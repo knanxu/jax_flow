@@ -60,7 +60,7 @@ class ConditionalUnet1D(nn.Module):
     kernel_size: int = 5
     n_groups: int = 8
     cond_predict_scale: bool = True
-    dim_mult: tuple[int, ...] = (1, 2, 2)
+    dim_mult: tuple[int, ...] = (1, 2, 4)
 
     @nn.compact
     def __call__(self, at, s, t, obs, training=False):
