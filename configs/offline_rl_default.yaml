@@ -18,10 +18,10 @@ algorithm:
   name: offline_rl
   # BC checkpoint path (for network architecture config)
   bc_checkpoint: null
-  load_bc_weights: false  # true = init encoder/flow from BC checkpoint weights
+  load_bc_weights: false  # true = init encoder/flow from BC checkpoint weights (mode 2 only)
 
-  # Encoder
-  freeze_encoder: true    # false = encoder updated by BC loss (same as BC agent)
+  # Encoder (RL phase only)
+  freeze_encoder: true    # false = encoder updated by BC+Q loss in RL phase
 
   # Critic (DSRL style: large network + tanh activation)
   critic_hidden_dims: [2048, 2048, 2048]
@@ -33,25 +33,22 @@ algorithm:
   tau: 0.005
   discount: 0.99
 
-  # Loss weights
+  # Loss weights (RL phase)
   alpha: 1.0              # BC loss weight
-  q_weight: 1.0           # Q loss weight (0 = pure BC, no RL signal)
+  q_weight: 1.0           # Q loss weight
   normalize_q_loss: true  # MeanFlowQL style normalization
 
   # Reward
   reward_offset: -1.0     # DSRL style: {0,1} -> {-1,0}
 
-  # Learning rates — match BC's 1e-4 for actor, keep critic at 3e-4
+  # Learning rates (RL phase)
   actor_lr: 1e-4
   critic_lr: 3e-4
 
-  # EMA
-  ema_decay: 0.995
-
   # Training
-  gradient_steps: 500000
   bc_warmup_steps: 0     # 0 = no warmup (mode 2), >0 = BC warmup then RL (mode 1)
-  batch_size: 256
+  rl_steps: 500000       # RL phase training steps
+  batch_size: 64
   log_interval: 1000
 
 # Evaluation
