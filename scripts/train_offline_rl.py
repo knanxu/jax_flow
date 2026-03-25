@@ -209,10 +209,11 @@ def main(cfg: DictConfig):
     # ================================================================
     # 5. Output directory and W&B
     # ================================================================
-    env_name = cfg.task.env_name
-    output_dir = Path(cfg.get("checkpoint_dir", "checkpoints")) / (
-        f"{cfg.get('experiment_name', f'offline_rl_{env_name}_{obs_type}')}"
-    )
+    # Use flow_type and network_type from BC checkpoint (not Hydra defaults)
+    bc_flow_type = bc_ckpt_config.get("flow_type", cfg.flow.name)
+    bc_network_type = bc_ckpt_config.get("network_type", cfg.network.name)
+    experiment_name = f"offline_rl_{cfg.task.name}_{bc_flow_type}_{bc_network_type}"
+    output_dir = Path(cfg.get("checkpoint_dir", "checkpoints")) / experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {output_dir}")
 
@@ -223,7 +224,7 @@ def main(cfg: DictConfig):
             wandb.init(
                 project=cfg.wandb.get("project", "jax_flow"),
                 entity=cfg.wandb.get("entity", None),
-                name=cfg.wandb.get("name", f"offline_rl_{env_name}_{obs_type}_seed{cfg.seed}"),
+                name=f"{experiment_name}_seed{cfg.seed}",
                 config=dict(OmegaConf.to_container(cfg, resolve=True)),
             )
         except ImportError:
