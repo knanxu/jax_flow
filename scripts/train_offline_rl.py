@@ -127,6 +127,11 @@ def main(cfg: DictConfig):
     bc_ckpt_config = bc_ckpt["config"]
     normalizers = bc_ckpt.get("normalizers", {})
 
+    print(f"BC checkpoint flow_type: {bc_ckpt_config.get('flow_type', 'unknown')}")
+    print(f"BC checkpoint network_type: {bc_ckpt_config.get('network_type', 'unknown')}")
+    print(f"BC checkpoint gradient_steps: {bc_ckpt_config.get('gradient_steps', 'unknown')}")
+    print(f"(NOTE: the Hydra config printed above shows defaults, not the actual BC policy config)")
+
     # ================================================================
     # 2. Resolve dataset
     # ================================================================
