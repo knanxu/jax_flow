@@ -239,6 +239,10 @@ def main():
                         help="Rollout in env instead of open-loop visualization")
     parser.add_argument("--rollout_steps", type=int, default=30,
                         help="Max env steps per rollout")
+    parser.add_argument("--symmetric", action="store_true",
+                        help="Place agent on T-block symmetry axis to test multi-modal behavior")
+    parser.add_argument("--agent_distance", type=float, default=60.0,
+                        help="Distance from agent to T-block center along symmetry axis (for --symmetric)")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Output directory (default: next to checkpoint)")
     args = parser.parse_args()
@@ -304,11 +308,47 @@ def main():
     # Separate env for high-res scene rendering
     render_env = PushTEnv(legacy=False, render_size=512, render_action=False)
 
-    for idx, seed in enumerate(state_seeds):
-        print(f"\nState {idx+1}/{len(state_seeds)} (seed={seed})")
+    # Build list of (state_5d, label) to visualize
+    states_to_vis = []
+    if args.symmetric:
+        # Construct symmetric states: agent on T-block's symmetry axis
+        # T-shape local geometry (scale=30, length=4):
+        #   横杠: y in [0, 30], x in [-60, 60]
+        #   竖杆: y in [30, 120], x in [-15, 15]
+        # Symmetry axis is local x=0. Agent placed at local (0, -dist) i.e. below 横杠.
+        # We test with a few block poses.
+        block_configs = [
+            # (block_x, block_y, block_angle, label)
+            (256, 256, np.pi / 4, "goal_pose"),
+            (256, 256, 0.0, "upright"),
+            (300, 200, np.pi / 6, "rotated_30"),
+            (200, 300, -np.pi / 4, "rotated_neg45"),
+        ]
+        dist = args.agent_distance
+        for bx, by, bangle, label in block_configs:
+            # Agent position: along symmetry axis (local y direction), below the 横杠
+            # Local (0, -dist) -> world coords via rotation
+            ax = bx + dist * (-np.sin(bangle))
+            ay = by + dist * (-np.cos(bangle))
+            # Clamp to valid range
+            ax = np.clip(ax, 20, 492)
+            ay = np.clip(ay, 20, 492)
+            state_5d = np.array([ax, ay, bx, by, bangle])
+            states_to_vis.append((state_5d, f"symmetric_{label}"))
+    else:
+        for seed in state_seeds:
+            states_to_vis.append((seed, f"seed{seed}"))
 
-        # Reset to random state
-        env.reset(seed=seed)
+    for idx, (state_or_seed, label) in enumerate(states_to_vis):
+        print(f"\nState {idx+1}/{len(states_to_vis)} ({label})")
+
+        # Reset env and set state
+        env.reset(seed=0)
+        if isinstance(state_or_seed, np.ndarray):
+            env._set_state(state_or_seed)
+        else:
+            env.reset(seed=state_or_seed)
+
         agent_pos = np.array(env.agent.position)
         state = np.array(
             list(env.agent.position) + list(env.block.position) + [env.block.angle]
@@ -319,7 +359,8 @@ def main():
               f"Angle: {env.block.angle:.2f}")
 
         # Render scene (use render_env for high-res)
-        render_env.reset(seed=seed)
+        render_env.reset(seed=0)
+        render_env._set_state(state)
         scene_img = render_scene(render_env)
 
         if args.rollout:
@@ -331,8 +372,8 @@ def main():
             )
             plot_trajectories_on_scene(
                 scene_img, traces, agent_pos,
-                title=f"Rollout (seed={seed}, n={args.num_trajectories})",
-                output_path=output_dir / f"rollout_seed{seed}.png",
+                title=f"Rollout ({label}, n={args.num_trajectories})",
+                output_path=output_dir / f"rollout_{label}.png",
                 is_rollout=True,
             )
         else:
@@ -346,8 +387,8 @@ def main():
             )
             plot_trajectories_on_scene(
                 scene_img, trajectories, agent_pos,
-                title=f"Action Chunks (seed={seed}, n={args.num_trajectories})",
-                output_path=output_dir / f"actions_seed{seed}.png",
+                title=f"Action Chunks ({label}, n={args.num_trajectories})",
+                output_path=output_dir / f"actions_{label}.png",
             )
 
     pygame.quit()
