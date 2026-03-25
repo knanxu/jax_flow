@@ -316,13 +316,18 @@ def main():
         #   横杠: y in [0, 30], x in [-60, 60]
         #   竖杆: y in [30, 120], x in [-15, 15]
         # Symmetry axis is local x=0. Agent placed at local (0, -dist) i.e. below 横杠.
-        # We test with a few block poses.
+        # Goal pose is (256, 256, pi/4). Block is placed away from goal so policy
+        # must decide to push left or right — revealing bimodal behavior.
         block_configs = [
             # (block_x, block_y, block_angle, label)
-            (256, 256, np.pi / 4, "goal_pose"),
-            (256, 256, 0.0, "upright"),
-            (300, 200, np.pi / 6, "rotated_30"),
-            (200, 300, -np.pi / 4, "rotated_neg45"),
+            # T upright, above center — agent below, must push toward goal
+            (256, 180, 0.0, "upright_above"),
+            # T upright, left of center
+            (180, 256, 0.0, "upright_left"),
+            # T slightly rotated, above center
+            (256, 180, np.pi / 8, "slight_rot"),
+            # T at goal angle but offset — agent on axis
+            (350, 200, np.pi / 4, "goal_angle_offset"),
         ]
         dist = args.agent_distance
         for bx, by, bangle, label in block_configs:
