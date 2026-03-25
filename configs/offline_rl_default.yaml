@@ -24,7 +24,7 @@ algorithm:
   freeze_encoder: true    # false = encoder updated by BC+Q loss in RL phase
 
   # Critic (DSRL style: large network + tanh activation)
-  critic_hidden_dims: [2048, 2048, 2048]
+  critic_hidden_dims: [512, 1024, 512]
   critic_activation: tanh
   critic_layer_norm: true
   num_ensembles: 2

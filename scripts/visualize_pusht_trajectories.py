@@ -33,6 +33,7 @@ import pymunk.pygame_util
 from jax_flow.agents.bc_agent import BCAgent
 from jax_flow.core.checkpoint import load_checkpoint, restore_agent
 from jax_flow.envs.pusht.pusht_env import PushTEnv
+from jax_flow.envs.pusht.pusht_image_env import PushTImageEnv
 
 
 def render_scene(env):
@@ -61,16 +62,34 @@ def render_scene(env):
     return img
 
 
-def get_normalized_obs(env, obs_normalizer, obs_steps):
+def get_normalized_obs(env, obs_normalizer, lowdim_normalizer, obs_steps, obs_type="state"):
     """Get normalized, frame-stacked observation from current env state."""
-    raw_obs = env._get_obs().astype(np.float32)
-    if obs_normalizer is not None:
-        obs = obs_normalizer.normalize(raw_obs)
+    if obs_type == "image":
+        # Use PushTImageEnv's _get_obs which returns {"image": (C,H,W), "agent_pos": (2,)}
+        raw_obs = env._get_obs()
+        # image: (C,H,W) -> (H,W,C) float32 [0,1]
+        img = raw_obs["image"]
+        if img.ndim == 3 and img.shape[0] in (1, 3):
+            img = np.transpose(img, (1, 2, 0))
+        img = img.astype(np.float32)
+        # agent_pos: normalize with lowdim_normalizer
+        agent_pos = raw_obs["agent_pos"].astype(np.float32)
+        if lowdim_normalizer is not None:
+            agent_pos = lowdim_normalizer.normalize(agent_pos)
+        # Stack obs_steps copies
+        obs = {
+            "image": np.stack([img] * obs_steps, axis=0),       # (obs_steps, H, W, C)
+            "agent_pos": np.stack([agent_pos] * obs_steps, axis=0),  # (obs_steps, 2)
+        }
+        return obs
     else:
-        obs = raw_obs
-    # Stack obs_steps copies (no history at initial state)
-    obs_stacked = np.stack([obs] * obs_steps, axis=0)  # (obs_steps, obs_dim)
-    return obs_stacked
+        raw_obs = env._get_obs().astype(np.float32)
+        if obs_normalizer is not None:
+            obs = obs_normalizer.normalize(raw_obs)
+        else:
+            obs = raw_obs
+        obs_stacked = np.stack([obs] * obs_steps, axis=0)  # (obs_steps, obs_dim)
+        return obs_stacked
 
 
 def sample_trajectories(agent, obs_batch, num_trajectories, action_normalizer):
@@ -101,8 +120,9 @@ def sample_trajectories(agent, obs_batch, num_trajectories, action_normalizer):
 
 
 def rollout_trajectories(env, agent, obs_normalizer, action_normalizer,
-                         obs_steps, act_steps, num_trajectories, max_steps,
-                         initial_state):
+                         lowdim_normalizer, obs_steps, act_steps,
+                         num_trajectories, max_steps, initial_state,
+                         obs_type="state"):
     """Rollout trajectories by actually stepping the environment.
 
     Returns list of agent position traces, each (T, 2) in world coords.
@@ -117,20 +137,27 @@ def rollout_trajectories(env, agent, obs_normalizer, action_normalizer,
         obs_history = []
 
         for step in range(max_steps):
-            raw_obs = env._get_obs().astype(np.float32)
-            if obs_normalizer is not None:
-                obs = obs_normalizer.normalize(raw_obs)
+            obs = get_normalized_obs(env, obs_normalizer, lowdim_normalizer, 1, obs_type)
+            # obs is either (1, obs_dim) or dict with (1, ...) values for single frame
+            if isinstance(obs, dict):
+                # Extract single frame, append to history
+                single = {k: v[0] for k, v in obs.items()}
             else:
-                obs = raw_obs
-            obs_history.append(obs)
+                single = obs[0]
+            obs_history.append(single)
 
             # Build frame-stacked obs
             if len(obs_history) < obs_steps:
-                stacked = [obs_history[0]] * (obs_steps - len(obs_history)) + obs_history
+                frames = [obs_history[0]] * (obs_steps - len(obs_history)) + obs_history
             else:
-                stacked = obs_history[-obs_steps:]
-            obs_stacked = np.stack(stacked, axis=0)
-            obs_batch = jnp.array(obs_stacked)[None]  # (1, obs_steps, obs_dim)
+                frames = obs_history[-obs_steps:]
+
+            if isinstance(frames[0], dict):
+                stacked = {k: np.stack([f[k] for f in frames], axis=0) for k in frames[0]}
+                obs_batch = jax.tree.map(lambda x: jnp.array(x)[None], stacked)
+            else:
+                stacked = np.stack(frames, axis=0)
+                obs_batch = jnp.array(stacked)[None]
 
             # Sample actions
             rng = jax.random.PRNGKey(i * 1000 + step)
@@ -224,15 +251,31 @@ def main():
 
     obs_normalizer = normalizers.get("obs")
     action_normalizer = normalizers.get("action")
+    lowdim_normalizer = normalizers.get("lowdim")
     obs_steps = config.get("obs_steps", 2)
     act_steps = config.get("act_steps", 8)
     horizon = config.get("horizon", 16)
     action_dim = config.get("action_dim", 2)
-    obs_dim = config.get("obs_dim", 5)
+    obs_type = config.get("obs_type", "state")
 
     # Restore agent
     print("Restoring agent...")
-    ex_observations = jnp.zeros((1, obs_steps, obs_dim))
+    if obs_type == "image":
+        image_keys = config.get("image_keys", ("image",))
+        lowdim_keys = config.get("lowdim_keys", ())
+        ex_observations = {}
+        for key in image_keys:
+            ex_observations[key] = jnp.zeros((1, obs_steps, 96, 96, 3))
+        # Infer lowdim dim from normalizer
+        lowdim_dim = config.get("obs_dim")
+        if lowdim_dim is None and lowdim_normalizer is not None:
+            if hasattr(lowdim_normalizer, "min_val"):
+                lowdim_dim = lowdim_normalizer.min_val.shape[-1]
+        if lowdim_dim is not None and lowdim_dim > 0 and lowdim_keys:
+            ex_observations["lowdim"] = jnp.zeros((1, obs_steps, lowdim_dim))
+    else:
+        obs_dim = config.get("obs_dim", 5)
+        ex_observations = jnp.zeros((1, obs_steps, obs_dim))
     ex_actions = jnp.zeros((1, horizon, action_dim))
     agent, _ = restore_agent(args.checkpoint, BCAgent, ex_observations, ex_actions)
     print(f"Agent restored (step {checkpoint.get('training_step', '?')})")
@@ -245,7 +288,6 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize pygame (needed for rendering)
-    import pymunk.pygame_util
     pygame.init()
 
     # Determine state seeds
@@ -254,8 +296,13 @@ def main():
     else:
         state_seeds = list(range(args.num_states))
 
-    # Create env
-    env = PushTEnv(legacy=False, render_size=512, render_action=False)
+    # Create env (use image env for image obs_type)
+    if obs_type == "image":
+        env = PushTImageEnv(legacy=False, render_size=96)
+    else:
+        env = PushTEnv(legacy=False, render_size=512, render_action=False)
+    # Separate env for high-res scene rendering
+    render_env = PushTEnv(legacy=False, render_size=512, render_action=False)
 
     for idx, seed in enumerate(state_seeds):
         print(f"\nState {idx+1}/{len(state_seeds)} (seed={seed})")
@@ -271,15 +318,16 @@ def main():
               f"Block: ({env.block.position[0]:.0f}, {env.block.position[1]:.0f}), "
               f"Angle: {env.block.angle:.2f}")
 
-        # Render scene
-        scene_img = render_scene(env)
+        # Render scene (use render_env for high-res)
+        render_env.reset(seed=seed)
+        scene_img = render_scene(render_env)
 
         if args.rollout:
             # Rollout trajectories
             traces = rollout_trajectories(
-                env, agent, obs_normalizer, action_normalizer,
+                env, agent, obs_normalizer, action_normalizer, lowdim_normalizer,
                 obs_steps, act_steps, args.num_trajectories,
-                args.rollout_steps, state,
+                args.rollout_steps, state, obs_type,
             )
             plot_trajectories_on_scene(
                 scene_img, traces, agent_pos,
@@ -289,8 +337,9 @@ def main():
             )
         else:
             # Open-loop: sample action chunks from current obs
-            obs_stacked = get_normalized_obs(env, obs_normalizer, obs_steps)
-            obs_batch = jnp.array(obs_stacked)[None]  # (1, obs_steps, obs_dim)
+            obs_stacked = get_normalized_obs(env, obs_normalizer, lowdim_normalizer, obs_steps, obs_type)
+            # Add batch dim
+            obs_batch = jax.tree.map(lambda x: jnp.array(x)[None], obs_stacked)
 
             trajectories = sample_trajectories(
                 agent, obs_batch, args.num_trajectories, action_normalizer
