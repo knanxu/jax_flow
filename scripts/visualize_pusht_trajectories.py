@@ -17,6 +17,10 @@ Usage:
 
     # Rollout trajectories in the environment (simulate physics)
     python scripts/visualize_pusht_trajectories.py --checkpoint path/to/best_model.pkl --rollout
+
+    # T-block at goal angle, offset from goal, agent above T on symmetry axis
+    python scripts/visualize_pusht_trajectories.py --checkpoint path/to/best_model.pkl \
+        --goal_offset --block_offset 80 --agent_distance 60
 """
 
 import argparse
@@ -243,6 +247,10 @@ def main():
                         help="Place agent on T-block symmetry axis to test multi-modal behavior")
     parser.add_argument("--agent_distance", type=float, default=60.0,
                         help="Distance from agent to T-block center along symmetry axis (for --symmetric)")
+    parser.add_argument("--goal_offset", action="store_true",
+                        help="T-block at goal angle but offset along symmetry axis, agent above T on axis")
+    parser.add_argument("--block_offset", type=float, default=80.0,
+                        help="Distance to offset T-block from goal along symmetry axis (for --goal_offset)")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Output directory (default: next to checkpoint)")
     args = parser.parse_args()
@@ -310,7 +318,27 @@ def main():
 
     # Build list of (state_5d, label) to visualize
     states_to_vis = []
-    if args.symmetric:
+    if args.goal_offset:
+        # T-block at goal angle (pi/4), offset from goal along symmetry axis (local -y).
+        # Agent on T's symmetry axis, above the 横杠 side.
+        # Local (0, -d) rotated by theta -> world (-d*sin(theta), -d*cos(theta))
+        goal_x, goal_y, goal_angle = 256.0, 256.0, np.pi / 4
+        block_offset = args.block_offset
+        agent_dist = args.agent_distance
+
+        # Offset block from goal along local -y (横杠 side, up-left in screen)
+        bx = goal_x + block_offset * (-np.sin(goal_angle))
+        by = goal_y + block_offset * (-np.cos(goal_angle))
+
+        # Agent further along same direction from block center
+        ax = bx + agent_dist * (-np.sin(goal_angle))
+        ay = by + agent_dist * (-np.cos(goal_angle))
+
+        ax = np.clip(ax, 20, 492)
+        ay = np.clip(ay, 20, 492)
+        state_5d = np.array([ax, ay, bx, by, goal_angle])
+        states_to_vis.append((state_5d, f"goal_offset_{block_offset:.0f}"))
+    elif args.symmetric:
         # Construct symmetric states: agent on T-block's symmetry axis
         # T-shape local geometry (scale=30, length=4):
         #   横杠: y in [0, 30], x in [-60, 60]
