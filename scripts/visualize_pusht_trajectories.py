@@ -321,17 +321,17 @@ def main():
     if args.goal_offset:
         # T-block at goal angle (pi/4), offset from goal along symmetry axis (local -y).
         # Agent on T's symmetry axis, above the 横杠 side.
-        # Local (0, -d) rotated by theta -> world (-d*sin(theta), -d*cos(theta))
+        # Local (0, -d) rotated by theta -> world (d*sin(theta), -d*cos(theta))
         goal_x, goal_y, goal_angle = 256.0, 256.0, np.pi / 4
         block_offset = args.block_offset
         agent_dist = args.agent_distance
 
-        # Offset block from goal along local -y (横杠 side, up-left in screen)
-        bx = goal_x + block_offset * (-np.sin(goal_angle))
+        # Offset block from goal along local -y (横杠 side, upper-right in screen)
+        bx = goal_x + block_offset * np.sin(goal_angle)
         by = goal_y + block_offset * (-np.cos(goal_angle))
 
         # Agent further along same direction from block center
-        ax = bx + agent_dist * (-np.sin(goal_angle))
+        ax = bx + agent_dist * np.sin(goal_angle)
         ay = by + agent_dist * (-np.cos(goal_angle))
 
         ax = np.clip(ax, 20, 492)
@@ -359,9 +359,9 @@ def main():
         ]
         dist = args.agent_distance
         for bx, by, bangle, label in block_configs:
-            # Agent position: along symmetry axis (local y direction), below the 横杠
-            # Local (0, -dist) -> world coords via rotation
-            ax = bx + dist * (-np.sin(bangle))
+            # Agent position: along symmetry axis, on 横杠 side (local -y)
+            # Local (0, -dist) rotated by theta -> (dist*sin(theta), -dist*cos(theta))
+            ax = bx + dist * np.sin(bangle)
             ay = by + dist * (-np.cos(bangle))
             # Clamp to valid range
             ax = np.clip(ax, 20, 492)
