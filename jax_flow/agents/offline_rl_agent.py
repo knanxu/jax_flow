@@ -16,7 +16,7 @@ import optax
 from jax_flow.agents.bc_agent import _create_flow_def, _ema_update
 from jax_flow.agents.train_state import ModuleDict, TrainState, nonpytree_field
 from jax_flow.core.checkpoint import load_checkpoint
-from jax_flow.core.utils import get_batch_size, make_offline_rl_param_labels
+from jax_flow.core.utils import create_optimizer, get_batch_size, make_offline_rl_param_labels
 from jax_flow.flow.interpolant import Interpolant
 from jax_flow.flow.losses import get_loss_fn
 from jax_flow.flow.samplers import get_sampler
@@ -173,9 +173,25 @@ class OfflineRLAgent(flax.struct.PyTreeNode):
         network_params = flax.core.freeze(network_params)
 
         # --- Build multi_transform optimizer ---
-        actor_lr = config.get("actor_lr", 1e-4)
+        # Actor optimizer mirrors BC: cosine schedule + warmup + grad_clip + weight_decay
+        actor_lr = config.get("actor_lr", bc_config.get("lr", 1e-4))
         critic_lr = config.get("critic_lr", 3e-4)
         freeze_encoder = config.get("freeze_encoder", True)
+
+        actor_tx = create_optimizer(
+            lr=actor_lr,
+            weight_decay=bc_config.get("weight_decay", 0.0),
+            schedule_type=bc_config.get("schedule_type", "constant"),
+            warmup_steps=bc_config.get("warmup_steps", 0),
+            total_steps=config.get("gradient_steps", 500000),
+            grad_clip_norm=bc_config.get("grad_clip_norm", 0.0),
+            b1=bc_config.get("b1", 0.95),
+            b2=bc_config.get("b2", 0.999),
+        )
+        critic_tx = create_optimizer(
+            lr=critic_lr,
+            grad_clip_norm=bc_config.get("grad_clip_norm", 0.0),
+        )
 
         param_labels = make_offline_rl_param_labels(
             network_params, freeze_encoder=freeze_encoder
@@ -183,8 +199,8 @@ class OfflineRLAgent(flax.struct.PyTreeNode):
         tx = optax.multi_transform(
             {
                 "frozen": optax.set_to_zero(),
-                "actor": optax.adam(learning_rate=actor_lr),
-                "critic": optax.adam(learning_rate=critic_lr),
+                "actor": actor_tx,
+                "critic": critic_tx,
             },
             param_labels,
         )
