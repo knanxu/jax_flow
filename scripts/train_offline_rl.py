@@ -38,12 +38,14 @@ from jax_flow.data import DatasetManager, make_dataset, make_robomimic_dataset
 from jax_flow.envs import make_env, make_robomimic_env
 
 
-def create_bc_config(bc_ckpt_config, algo_cfg, task_cfg):
-    """Build BCAgent config from BC checkpoint config + overrides."""
-    config = dict(bc_ckpt_config)
-    # Override gradient_steps to match bc_warmup_steps for cosine schedule
-    config["gradient_steps"] = algo_cfg.get("bc_warmup_steps", 150000)
-    return config
+def create_bc_config(bc_ckpt_config):
+    """Build BCAgent config from BC checkpoint config.
+
+    NOTE: gradient_steps is NOT overridden — it controls both the LR cosine
+    schedule and the MeanFlow delta_t progressive schedule.  Changing it to
+    bc_warmup_steps compresses the delta_t ramp and degrades MeanFlow training.
+    """
+    return dict(bc_ckpt_config)
 
 
 def create_rl_config(bc_ckpt_config, algo_cfg, task_cfg):
@@ -338,7 +340,7 @@ def main(cfg: DictConfig):
         print("=" * 80)
 
         # Create BCAgent (100% identical to train_bc.py)
-        bc_config = create_bc_config(bc_ckpt_config, algo, cfg.task)
+        bc_config = create_bc_config(bc_ckpt_config)
         bc_agent = BCAgent.create(
             seed=cfg.seed,
             ex_observations=ex_obs,
