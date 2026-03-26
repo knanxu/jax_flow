@@ -393,7 +393,7 @@ class RobomimicImageDataset:
 
         return observations
 
-    def sample_sequence(self, batch_size, discount=0.99, rng=None):
+    def sample_sequence(self, batch_size, discount=0.99, rng=None, reward_offset=None):
         """Sample action-chunk sequences for offline RL training.
 
         Per-episode sampling, never crosses episode boundaries.

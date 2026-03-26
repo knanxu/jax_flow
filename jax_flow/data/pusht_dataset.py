@@ -6,9 +6,54 @@ from pathlib import Path
 import numpy as np
 import zarr
 from huggingface_hub import hf_hub_download
+from shapely import affinity
+from shapely import geometry as sg
 from tqdm import tqdm
 
 from jax_flow.data.normalizer import MinMaxNormalizer
+
+# T-block geometry (from PushTEnv.add_tee, scale=30, length=4)
+_TEE_SCALE = 30
+_TEE_LENGTH = 4
+_TEE_VERTICES1 = [
+    (-_TEE_LENGTH * _TEE_SCALE / 2, _TEE_SCALE),
+    (_TEE_LENGTH * _TEE_SCALE / 2, _TEE_SCALE),
+    (_TEE_LENGTH * _TEE_SCALE / 2, 0),
+    (-_TEE_LENGTH * _TEE_SCALE / 2, 0),
+]
+_TEE_VERTICES2 = [
+    (-_TEE_SCALE / 2, _TEE_SCALE),
+    (-_TEE_SCALE / 2, _TEE_LENGTH * _TEE_SCALE),
+    (_TEE_SCALE / 2, _TEE_LENGTH * _TEE_SCALE),
+    (_TEE_SCALE / 2, _TEE_SCALE),
+]
+_TEE_BASE = sg.Polygon(_TEE_VERTICES1).union(sg.Polygon(_TEE_VERTICES2))
+_GOAL_POSE = np.array([256.0, 256.0, np.pi / 4])
+_SUCCESS_THRESHOLD = 0.95
+
+
+def _compute_coverage_batch(states):
+    """Compute coverage scores for a batch of block states.
+
+    Args:
+        states: (N, 5) array with columns [agent_x, agent_y, block_x, block_y, block_angle].
+
+    Returns:
+        (N,) array of reward values in [0, 1].
+    """
+    goal_geom = affinity.rotate(_TEE_BASE, np.degrees(_GOAL_POSE[2]), origin=(0, 0))
+    goal_geom = affinity.translate(goal_geom, _GOAL_POSE[0], _GOAL_POSE[1])
+    goal_area = goal_geom.area
+
+    rewards = np.empty(len(states), dtype=np.float32)
+    for i in range(len(states)):
+        block_geom = affinity.rotate(
+            _TEE_BASE, np.degrees(states[i, 4]), origin=(0, 0)
+        )
+        block_geom = affinity.translate(block_geom, states[i, 2], states[i, 3])
+        coverage = goal_geom.intersection(block_geom).area / goal_area
+        rewards[i] = np.clip(coverage / _SUCCESS_THRESHOLD, 0.0, 1.0)
+    return rewards
 
 
 def download_pusht_dataset(
@@ -126,6 +171,11 @@ class PushTDataset:
         elif self.obs_type == "image":
             img = np.array(root["data"]["img"])  # (N, H, W, C)
 
+        # Precompute dense rewards (coverage score) from block state
+        print("Computing dense rewards from block coverage...")
+        all_rewards = _compute_coverage_batch(state)
+        print(f"  reward range: [{all_rewards.min():.4f}, {all_rewards.max():.4f}], mean={all_rewards.mean():.4f}")
+
         # Split episodes
         total_episodes = len(episode_ends)
         if val_ratio > 0.0:
@@ -141,6 +191,7 @@ class PushTDataset:
         # Convert to per-episode lists
         self.episode_obs = []
         self.episode_actions = []
+        self.episode_rewards = []
         if self.obs_type == "image":
             self.episode_images = []
             self.episode_agent_pos = []
@@ -166,11 +217,13 @@ class PushTDataset:
                 obs = None  # Handled separately
 
             act = action[start:end].astype(np.float32)
+            rew = all_rewards[start:end]
 
             if obs is not None:
                 self.episode_obs.append(obs)
                 all_obs.append(obs)
             self.episode_actions.append(act)
+            self.episode_rewards.append(rew)
             all_actions.append(act)
 
             start = end
@@ -310,8 +363,7 @@ class PushTDataset:
     def sample_sequence(self, batch_size, discount=0.99, rng=None, reward_offset=0.0):
         """Sample action-chunk sequences for offline RL training.
 
-        Push-T uses sparse terminal reward: reward=1 at episode end, 0 elsewhere.
-        Combined with reward_offset, this gives {reward_offset, 1+reward_offset}.
+        Uses precomputed dense coverage rewards instead of sparse terminal reward.
 
         Args:
             batch_size: Number of sequences to sample.
@@ -355,6 +407,7 @@ class PushTDataset:
 
         for ep_idx in ep_indices:
             ep_act = self.episode_actions[ep_idx]
+            ep_rew = self.episode_rewards[ep_idx]
             ep_len = len(ep_act)
 
             max_start = ep_len - self.horizon
@@ -366,17 +419,12 @@ class PushTDataset:
             # --- Actions ---
             actions = ep_act[t : t + self.horizon]
 
-            # --- Rewards: sparse terminal reward ---
-            rewards = np.zeros(self.horizon, dtype=np.float32)
-            for i in range(self.horizon):
-                if t + i == ep_len - 1:
-                    rewards[i] = 1.0
-            rewards = rewards + reward_offset
-            cum_reward = np.sum(rewards * discount_powers)
+            # --- Rewards: dense coverage + offset ---
+            chunk_rewards = ep_rew[t : t + self.horizon] + reward_offset
+            cum_reward = np.sum(chunk_rewards * discount_powers)
 
             # --- Next observations ---
             last_t = t + self.horizon - 1
-            # next_obs uses last_t+1 if available, else last_t
             next_t = min(last_t + 1, ep_len - 1)
             next_obs = self._build_obs_for_rl(ep_idx, next_t)
 

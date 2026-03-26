@@ -26,7 +26,8 @@ from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
 from jax_flow.agents.bc_agent import BCAgent
-from jax_flow.agents.offline_rl_agent import CriticState, OfflineRLAgent
+from jax_flow.agents.critic_state import CriticState
+from jax_flow.agents.offline_rl_agent import OfflineRLAgent
 from jax_flow.core.checkpoint import (
     cleanup_old_checkpoints,
     load_checkpoint,
@@ -50,6 +51,7 @@ def create_bc_config(bc_ckpt_config):
 
 def create_rl_config(bc_ckpt_config, algo_cfg, task_cfg):
     """Build OfflineRLAgent config for RL phase."""
+    critic_encoder_type = algo_cfg.get("critic_encoder_type", "none")
     return {
         # From BC config (needed for sampler/loss)
         "horizon": bc_ckpt_config.get("horizon", task_cfg.dataset.horizon),
@@ -82,12 +84,16 @@ def create_rl_config(bc_ckpt_config, algo_cfg, task_cfg):
         "critic_lr": algo_cfg.get("critic_lr", 3e-4),
         "grad_clip_norm": bc_ckpt_config.get("grad_clip_norm", 10.0),
         "freeze_encoder": algo_cfg.get("freeze_encoder", True),
+        # Critic encoder
+        "critic_encoder_type": critic_encoder_type,
+        "critic_has_encoder": critic_encoder_type != "none",
     }
 
 
 def create_critic_config(algo_cfg, bc_ckpt_config):
     """Build CriticState config for BC warmup phase."""
-    return {
+    critic_encoder_type = algo_cfg.get("critic_encoder_type", "none")
+    config = {
         "critic_hidden_dims": list(algo_cfg.get("critic_hidden_dims", [2048, 2048, 2048])),
         "critic_activation": algo_cfg.get("critic_activation", "tanh"),
         "critic_layer_norm": algo_cfg.get("critic_layer_norm", True),
@@ -97,7 +103,22 @@ def create_critic_config(algo_cfg, bc_ckpt_config):
         "tau": algo_cfg.get("tau", 0.005),
         "discount": algo_cfg.get("discount", 0.99),
         "act_exec_steps": bc_ckpt_config.get("act_steps", 8),
+        # Critic encoder
+        "critic_encoder_type": critic_encoder_type,
     }
+    # Pass BC encoder architecture params when critic needs its own encoder
+    if critic_encoder_type != "none":
+        config.update({
+            "encoder_type": bc_ckpt_config.get("encoder_type", "mlp"),
+            "encoder_hidden_dims": list(bc_ckpt_config.get("encoder_hidden_dims", [256, 256])),
+            "emb_dim": bc_ckpt_config.get("emb_dim", 256),
+            "image_keys": list(bc_ckpt_config.get("image_keys", ["agentview_image"])),
+            "lowdim_keys": list(bc_ckpt_config.get(
+                "lowdim_keys", ["robot0_eef_pos", "robot0_gripper_qpos"]
+            )),
+            "crop_shape": bc_ckpt_config.get("crop_shape", None),
+        })
+    return config
 
 
 @hydra.main(
@@ -280,6 +301,7 @@ def main(cfg: DictConfig):
             batch_size=batch_size,
             discount=algo.get("discount", 0.99),
             rng=rng_np,
+            reward_offset=reward_offset,
         )
         if isinstance(batch_np["observations"], dict):
             obs = {k: jnp.array(v) for k, v in batch_np["observations"].items()}
@@ -367,6 +389,7 @@ def main(cfg: DictConfig):
             ex_cond=ex_cond,
             ex_actions=ex_actions,
             config=critic_config,
+            ex_observations=ex_obs,
         )
         print("CriticState created.")
 
@@ -480,8 +503,10 @@ def main(cfg: DictConfig):
                     "train/actor_loss": float(info["actor_loss"]),
                     "train/bc_loss": float(info["bc_loss"]),
                     "train/q_loss": float(info["q_loss"]),
+                    "train/q_loss_raw": float(info["q_loss_raw"]),
                     "train/q_mean": float(info["q_mean"]),
                     "train/target_q_mean": float(info["target_q_mean"]),
+                    "train/q_actor_mean": float(info["q_actor_mean"]),
                     "train/phase": 1,
                     "train/step": rl_step,
                 }, step=rl_step)

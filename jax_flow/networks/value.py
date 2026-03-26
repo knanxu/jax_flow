@@ -28,28 +28,36 @@ class Value(nn.Module):
     """Value/critic network for Q-learning.
 
     Supports ensemble of Q-functions for better stability.
+    Optionally embeds an independent encoder for raw observation input.
     """
 
+    encoder: nn.Module | None = None
     hidden_dims: tuple[int, ...] = (512, 512, 512, 512)
     layer_norm: bool = True
     num_ensembles: int = 2
     activation: str = "gelu"
 
     @nn.compact
-    def __call__(self, observations, actions=None):
+    def __call__(self, observations, actions=None, training=False):
         """Compute Q-values Q(s,a) or state-values V(s).
 
         Args:
-            observations: Observations. Shape: (batch, obs_dim)
+            observations: Observations — raw obs if encoder is set, else pre-encoded features.
             actions: Actions. Shape: (batch, action_dim). If None, computes V(s).
+            training: Training mode flag (passed to encoder if present).
 
         Returns:
             Values. Shape: (num_ensembles, batch) if ensemble, else (batch,)
         """
-        if actions is not None:
-            x = jnp.concatenate([observations, actions], axis=-1)
+        if self.encoder is not None:
+            obs_encoded = self.encoder(observations, training=training)
         else:
-            x = observations
+            obs_encoded = observations
+
+        if actions is not None:
+            x = jnp.concatenate([obs_encoded, actions], axis=-1)
+        else:
+            x = obs_encoded
 
         if self.num_ensembles > 1:
             EnsembleQ = nn.vmap(

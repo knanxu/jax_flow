@@ -239,7 +239,7 @@ def save_offline_rl_checkpoint(
         "step": agent.network.step,
         "config": agent.config,
         "rng": agent.rng,
-        "ema_params": agent.ema_params,
+        "ema_params": agent.network.params,  # OfflineRLAgent has no EMA; use current params
         "training_step": step,
         "bc_checkpoint_path": bc_checkpoint_path,
     }

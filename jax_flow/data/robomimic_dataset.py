@@ -250,7 +250,7 @@ class RobomimicDataset:
             obs_list.append(ep_obs[obs_t])
         return np.stack(obs_list, axis=0)
 
-    def sample_sequence(self, batch_size, discount=0.99, rng=None):
+    def sample_sequence(self, batch_size, discount=0.99, rng=None, reward_offset=None):
         """Sample action-chunk sequences for offline RL training.
 
         Per-episode sampling: randomly selects episodes (weighted by valid
