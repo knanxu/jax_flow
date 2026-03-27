@@ -24,7 +24,7 @@ algorithm:
   freeze_encoder: true    # false = encoder updated by BC+Q loss in RL phase
 
   # Critic encoder
-  critic_encoder_type: "none"   # "none"=用BC encoder输出(向后兼容), "same"=同BC encoder架构独立权重
+  critic_encoder_type: "same"   # "none"=用BC encoder输出(向后兼容), "same"=同BC encoder架构独立权重
 
   # Critic (DSRL style: large network + tanh activation)
   critic_hidden_dims: [512, 1024, 512]
@@ -37,7 +37,7 @@ algorithm:
   discount: 0.99
 
   # Loss weights (RL phase)
-  alpha: 1.0              # BC loss weight
+  alpha: 10000.0          # BC loss weight (high to prevent Q-gradient from destroying BC policy)
   q_weight: 1.0           # Q loss weight
   normalize_q_loss: true  # MeanFlowQL style normalization
 
@@ -45,7 +45,7 @@ algorithm:
   reward_offset: -1.0     # robomimic: {0,1}->{-1,0}; Push-T dense reward: use 0.0
 
   # Learning rates (RL phase)
-  actor_lr: 1e-4
+  actor_lr: 1e-5
   critic_lr: 3e-4
 
   # Training
