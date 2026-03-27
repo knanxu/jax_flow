@@ -333,7 +333,7 @@ class OfflineRLAgent(flax.struct.PyTreeNode):
         act_exec_steps = config.get("act_exec_steps", 8)
         critic_has_encoder = config.get("critic_has_encoder", False)
 
-        rng, sample_rng = jax.random.split(rng)
+        rng, sample_rng, crop_rng_tc, crop_rng_c = jax.random.split(rng, 4)
 
         # Sample next actions from frozen flow policy (always needs actor encoder)
         sampler_type = config.get("sampler_type", "euler")
@@ -375,7 +375,10 @@ class OfflineRLAgent(flax.struct.PyTreeNode):
             )
 
         # Target Q — frozen (no grad_params)
-        next_qs = self.network(critic_next_obs, next_action_flat, name="target_critic")
+        next_qs = self.network(
+            critic_next_obs, next_action_flat, name="target_critic",
+            training=critic_has_encoder, rngs={"crop": crop_rng_tc},
+        )
         next_q = jnp.min(next_qs, axis=0)
         discount_factor = discount ** act_exec_steps
         target_q = batch["rewards"] + discount_factor * batch["masks"] * next_q
@@ -385,7 +388,7 @@ class OfflineRLAgent(flax.struct.PyTreeNode):
         action_flat = action_exec.reshape(action_exec.shape[0], -1)
         qs = self.network(
             critic_obs, action_flat, name="critic", params=grad_params,
-            training=critic_has_encoder,
+            training=critic_has_encoder, rngs={"crop": crop_rng_c},
         )
         critic_loss = jnp.mean((qs - target_q[None, :]) ** 2)
 
@@ -414,7 +417,7 @@ class OfflineRLAgent(flax.struct.PyTreeNode):
         freeze_encoder = config.get("freeze_encoder", True)
         act_exec_steps = config.get("act_exec_steps", 8)
 
-        rng, bc_rng, sample_rng, dropout_rng, crop_rng = jax.random.split(rng, 5)
+        rng, bc_rng, sample_rng, dropout_rng, crop_rng, critic_crop_rng = jax.random.split(rng, 6)
         dropout_rngs = {"dropout": dropout_rng, "crop": crop_rng}
 
         # --- BC loss ---
@@ -485,7 +488,10 @@ class OfflineRLAgent(flax.struct.PyTreeNode):
             critic_obs_for_q = self.network(
                 batch["observations"], training=False, name="encoder", rngs={},
             )
-        qs_actor = self.network(critic_obs_for_q, action_flat, name="critic")
+        qs_actor = self.network(
+            critic_obs_for_q, action_flat, name="critic",
+            rngs={"crop": critic_crop_rng},
+        )
         q_actor = jnp.mean(qs_actor, axis=0)
         q_loss_raw = -jnp.mean(q_actor)
 

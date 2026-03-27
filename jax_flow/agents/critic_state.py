@@ -166,7 +166,7 @@ class CriticState(flax.struct.PyTreeNode):
         Returns:
             (new_critic_state, info_dict)
         """
-        new_rng, rng, sample_rng = jax.random.split(self.rng, 3)
+        new_rng, rng, sample_rng, crop_rng, crop_rng2 = jax.random.split(self.rng, 5)
         config = self.config
         tau = config.get("tau", 0.005)
         discount = config.get("discount", 0.99)
@@ -204,7 +204,8 @@ class CriticState(flax.struct.PyTreeNode):
 
             # Target Q
             next_qs = self.network(
-                critic_next_obs, next_action_flat, name="target_critic"
+                critic_next_obs, next_action_flat, name="target_critic",
+                training=critic_has_encoder, rngs={"crop": crop_rng},
             )
             next_q = jnp.min(next_qs, axis=0)
             discount_factor = discount ** act_exec_steps
@@ -217,7 +218,7 @@ class CriticState(flax.struct.PyTreeNode):
             action_flat = action_exec.reshape(action_exec.shape[0], -1)
             qs = self.network(
                 critic_obs, action_flat, name="critic", params=params,
-                training=critic_has_encoder,
+                training=critic_has_encoder, rngs={"crop": crop_rng2},
             )
             critic_loss = jnp.mean((qs - target_q[None, :]) ** 2)
 
