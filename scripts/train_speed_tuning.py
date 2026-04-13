@@ -39,15 +39,15 @@ from jax_flow.data import DatasetManager, make_dataset, make_robomimic_dataset
 from jax_flow.envs import make_env, make_robomimic_env
 
 
-def create_base_env(cfg, normalizers, resolved_path):
+def create_base_env(cfg, normalizers, resolved_path, abs_action=False):
     """Create base env with FrameStack only (no ActionChunking).
 
     SpeedTuningEnvWrapper manages action execution itself.
+    abs_action should match the BC checkpoint's setting, not the task config.
     """
     task_source = cfg.task.get("task_source", "robomimic")
     obs_type = cfg.task.obs_type
     is_image = obs_type == "image"
-    abs_action = cfg.task.get("abs_action", False)
 
     common_kwargs = {
         "obs_normalizer": normalizers.get("obs"),
@@ -339,9 +339,10 @@ def main(cfg: DictConfig):
     num_actions = len(speed_options)
     print(f"Speed options ({num_actions}): {speed_options}")
 
-    abs_action = cfg.task.get("abs_action", False)
+    # Use abs_action from BC checkpoint — determines whether env needs rot6d->axis_angle conversion
+    bc_abs_action = bc_ckpt_config.get("abs_action", False)
 
-    train_env = create_base_env(cfg, normalizers, resolved_path)
+    train_env = create_base_env(cfg, normalizers, resolved_path, abs_action=bc_abs_action)
     train_env = SpeedTuningEnvWrapper(
         env=train_env,
         bc_agent=bc_agent,
@@ -349,10 +350,10 @@ def main(cfg: DictConfig):
         alpha=algo.get("alpha", 0.1),
         beta=algo.get("beta", 2.0),
         k_skip=algo.get("k_skip", 4),
-        abs_action=abs_action,
+        abs_action=bc_abs_action,
     )
 
-    eval_env = create_base_env(cfg, normalizers, resolved_path)
+    eval_env = create_base_env(cfg, normalizers, resolved_path, abs_action=bc_abs_action)
     eval_env = SpeedTuningEnvWrapper(
         env=eval_env,
         bc_agent=bc_agent,
@@ -360,7 +361,7 @@ def main(cfg: DictConfig):
         alpha=algo.get("alpha", 0.1),
         beta=algo.get("beta", 2.0),
         k_skip=algo.get("k_skip", 4),
-        abs_action=abs_action,
+        abs_action=bc_abs_action,
     )
 
     # ================================================================
