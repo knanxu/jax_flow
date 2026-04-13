@@ -302,7 +302,13 @@ def main(cfg: DictConfig):
         }
     else:
         ex_obs = jnp.array(ex_sample["observations"][np.newaxis, ...])
-    ex_actions = jnp.array(ex_sample["actions"][np.newaxis, ...])
+
+    # Use action_dim from BC checkpoint config, NOT from dataset.
+    # Dataset may have transformed actions (e.g. 7D axis_angle -> 10D rot6d),
+    # but the BC network was built with the original action_dim.
+    bc_action_dim = bc_ckpt_config.get("action_dim", ex_sample["actions"].shape[-1])
+    bc_horizon = bc_ckpt_config.get("horizon", 16)
+    ex_actions = jnp.zeros((1, bc_horizon, bc_action_dim))
 
     # Create and restore BC agent
     bc_agent = BCAgent.create(
