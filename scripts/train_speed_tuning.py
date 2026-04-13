@@ -18,10 +18,9 @@ Usage:
 import os
 
 # Fix cuDNN algorithm picker failure on some GPU architectures (e.g. Ada)
-os.environ.setdefault(
-    "XLA_FLAGS",
-    "--xla_gpu_strict_conv_algorithm_picker=false",
-)
+_xla_flags = os.environ.get("XLA_FLAGS", "")
+if "--xla_gpu_strict_conv_algorithm_picker" not in _xla_flags:
+    os.environ["XLA_FLAGS"] = _xla_flags + " --xla_gpu_strict_conv_algorithm_picker=false"
 
 from pathlib import Path
 
