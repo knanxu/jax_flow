@@ -15,6 +15,14 @@ Usage:
         algorithm.max_speed=3.0 algorithm.speed_granularity=0.2
 """
 
+import os
+
+# Fix cuDNN algorithm picker failure on some GPU architectures (e.g. Ada)
+os.environ.setdefault(
+    "XLA_FLAGS",
+    "--xla_gpu_strict_conv_algorithm_picker=false",
+)
+
 from pathlib import Path
 
 import hydra
