@@ -189,7 +189,7 @@ def evaluate_speed_policy(agent, eval_env, num_episodes=20, max_steps=500):
 @hydra.main(
     version_base=None,
     config_path="../configs",
-    config_name="speed_tuning/default",
+    config_name="speed_tuning_config",
 )
 def main(cfg: DictConfig):
     """Main SpeedTuning training function."""
