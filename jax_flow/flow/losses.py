@@ -697,6 +697,186 @@ def imf_loss(network, encoder, interpolant, batch, rng, config, step=None):
     return total_loss, info
 
 
+def _cdist(x, y, eps=1e-8):
+    """Pairwise L2 distance using dot-product formula.
+
+    Matches the official JAX drifting kernel exactly.
+
+    Args:
+        x: (B, N, D)
+        y: (B, M, D)
+
+    Returns:
+        (B, N, M) pairwise L2 distances.
+    """
+    xydot = jnp.einsum("bnd,bmd->bnm", x, y)
+    xnorms = jnp.einsum("bnd,bnd->bn", x, x)
+    ynorms = jnp.einsum("bmd,bmd->bm", y, y)
+    sq_dist = xnorms[:, :, None] + ynorms[:, None, :] - 2 * xydot
+    return jnp.sqrt(jnp.clip(sq_dist, a_min=eps))
+
+
+def _drift_loss_single(gen, fixed_pos, R_list=(0.02, 0.05, 0.2)):
+    """Core drift loss on a single timestep slice.
+
+    Faithful port of drifting_util.drift_loss from phamtrongthang123/drifting_policy.
+    Goal computation is entirely stop_gradient; gradients flow only through gen.
+
+    Args:
+        gen: (B, G, S) generated samples (G = gen_per_label).
+        fixed_pos: (B, 1, S) positive (real) samples.
+        R_list: Temperature values for multi-scale force computation.
+
+    Returns:
+        loss: (B,) per-sample loss.
+        info: dict with 'scale' and per-R force norms.
+    """
+    B, C_g, S = gen.shape
+    C_p = fixed_pos.shape[1]
+
+    old_gen = jax.lax.stop_gradient(gen)
+    # targets = [old_gen, fixed_pos]  (no negatives for robot tasks)
+    targets = jnp.concatenate([old_gen, fixed_pos], axis=1)  # (B, C_g + C_p, S)
+    # All weights = 1
+    targets_w = jnp.ones((B, C_g + C_p))
+
+    # --- Goal computation (no gradients) ---
+    dist = _cdist(old_gen, targets)  # (B, C_g, C_g + C_p)
+    weighted_dist = dist * targets_w[:, None, :]
+    scale = jnp.mean(weighted_dist) / jnp.mean(targets_w)
+
+    scale_inputs = jnp.clip(scale / jnp.sqrt(S + 0.0), a_min=1e-3)
+    old_gen_scaled = old_gen / scale_inputs
+    targets_scaled = targets / scale_inputs
+
+    dist_normed = dist / jnp.clip(scale, a_min=1e-3)
+
+    # Mask self-connections for gen block (diagonal in gen-to-gen submatrix)
+    mask_val = 100.0
+    diag_mask = jnp.eye(C_g)  # (C_g, C_g)
+    block_mask = jnp.pad(diag_mask, ((0, 0), (0, C_p)))  # (C_g, C_g + C_p)
+    block_mask = block_mask[None, :, :]  # (1, C_g, C_g + C_p)
+    dist_normed = dist_normed + block_mask * mask_val
+
+    # Force loop over temperatures
+    force_across_R = jnp.zeros_like(old_gen_scaled)
+    info = {"scale": scale}
+
+    for R in R_list:
+        logits = -dist_normed / R
+
+        affinity = jax.nn.softmax(logits, axis=-1)
+        aff_transpose = jax.nn.softmax(logits, axis=-2)
+        affinity = jnp.sqrt(jnp.clip(affinity * aff_transpose, a_min=1e-6))
+
+        affinity = affinity * targets_w[:, None, :]
+
+        # Split into neg (gen) and pos (real) blocks
+        split_idx = C_g
+        aff_neg = affinity[:, :, :split_idx]   # (B, C_g, C_g)
+        aff_pos = affinity[:, :, split_idx:]    # (B, C_g, C_p)
+
+        sum_pos = jnp.sum(aff_pos, axis=-1, keepdims=True)   # (B, C_g, 1)
+        r_coeff_neg = -aff_neg * sum_pos                       # repulsive
+        sum_neg = jnp.sum(aff_neg, axis=-1, keepdims=True)    # (B, C_g, 1)
+        r_coeff_pos = aff_pos * sum_neg                        # attractive
+
+        R_coeff = jnp.concatenate([r_coeff_neg, r_coeff_pos], axis=2)  # (B, C_g, C_g+C_p)
+
+        total_force_R = jnp.einsum("biy,byx->bix", R_coeff, targets_scaled)
+        total_coeffs = jnp.sum(R_coeff, axis=-1)  # (B, C_g)
+        total_force_R = total_force_R - total_coeffs[:, :, None] * old_gen_scaled
+
+        f_norm_val = jnp.mean(total_force_R ** 2)
+        info[f"loss_{R}"] = f_norm_val
+
+        force_scale = jnp.sqrt(jnp.clip(f_norm_val, a_min=1e-8))
+        force_across_R = force_across_R + total_force_R / force_scale
+
+    goal_scaled = old_gen_scaled + force_across_R
+    goal_scaled = jax.lax.stop_gradient(goal_scaled)
+
+    # --- Loss with gradients through gen ---
+    gen_scaled = gen / jax.lax.stop_gradient(scale_inputs)
+    diff = gen_scaled - goal_scaled
+    loss = jnp.mean(diff ** 2, axis=(-1, -2))  # (B,)
+
+    return loss, info
+
+
+def drift_loss(network, encoder, interpolant, batch, rng, config, step=None):
+    """Drift policy loss: particle-based single-step generation.
+
+    Generates gen_per_label samples per observation, computes pairwise drift
+    forces between generated and real actions, and regresses network output
+    toward force-displaced goals. Per-timestep loss (independent drift loss
+    at each horizon step) matching all configs in phamtrongthang123/drifting_policy.
+
+    Args:
+        network: Flow network (at, s, t, cond, training).
+        encoder: Observation encoder.
+        interpolant: Unused (kept for signature compatibility).
+        batch: Batch with 'observations' and 'actions'.
+        rng: Random key.
+        config: Config dict with 'gen_per_label', 'drift_temperatures', 'loss_scale'.
+        step: Current training step (unused).
+
+    Returns:
+        Tuple of (loss, info_dict).
+    """
+    observations = batch["observations"]
+    actions = batch["actions"]  # (B, horizon, action_dim)
+
+    batch_size = get_batch_size(observations)
+    horizon = actions.shape[1]
+    action_dim = actions.shape[2]
+    G = config.get("gen_per_label", 8)
+    R_list = tuple(config.get("drift_temperatures", [0.02, 0.05, 0.2]))
+
+    # Encode observations
+    rng, crop_rng = jax.random.split(rng)
+    cond = encoder(observations, training=True, rngs={"crop": crop_rng})
+
+    # Repeat cond G times: (B, cond_dim) -> (B*G, cond_dim)
+    cond_rep = jnp.repeat(cond, G, axis=0)
+
+    # Sample G noise vectors per obs
+    rng, noise_rng = jax.random.split(rng)
+    noise = jax.random.normal(noise_rng, (batch_size * G, horizon, action_dim))
+
+    # Forward pass with s=t=0 (drift has no time concept)
+    s_zeros = jnp.zeros((batch_size * G,))
+    pred_all = network(noise, s_zeros, s_zeros, cond_rep, training=True)
+
+    # Reshape: (B*G, horizon, action_dim) -> (B, G, horizon, action_dim)
+    pred_actions = pred_all.reshape(batch_size, G, horizon, action_dim)
+
+    # Per-timestep drift loss: vmap over horizon dimension
+    def per_timestep_fn(t_idx):
+        gen_t = pred_actions[:, :, t_idx, :]            # (B, G, action_dim)
+        pos_t = actions[:, t_idx, :][:, None, :]        # (B, 1, action_dim)
+        loss_t, info_t = _drift_loss_single(gen_t, pos_t, R_list=R_list)
+        return loss_t.mean(), info_t
+
+    total_loss = 0.0
+    accumulated_scale = 0.0
+    for t in range(horizon):
+        loss_t, info_t = per_timestep_fn(t)
+        total_loss = total_loss + loss_t
+        accumulated_scale = accumulated_scale + info_t["scale"]
+
+    loss = total_loss / horizon
+    loss = loss * config.get("loss_scale", 1.0)
+
+    info = {
+        "loss": loss,
+        "drift_loss": loss,
+        "drift_scale": accumulated_scale / horizon,
+    }
+
+    return loss, info
+
+
 def get_loss_fn(loss_type="flow"):
     """Get loss function by type.
 
@@ -716,5 +896,7 @@ def get_loss_fn(loss_type="flow"):
         return imf_loss
     elif loss_type == "mf_stable" or loss_type == "meanflow_stable":
         return mf_loss_stable
+    elif loss_type == "drift" or loss_type == "drift_policy":
+        return drift_loss
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")

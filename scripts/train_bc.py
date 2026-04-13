@@ -70,6 +70,12 @@ def create_dataloader(dataset, batch_size, shuffle=True):
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig):
     """Main training function."""
+    # Merge task-level optimization overrides into top-level optimization
+    # Priority: optimization/default.yaml < task.optimization
+    # To override from CLI, use: task.optimization.batch_size=512
+    if "optimization" in cfg.task:
+        cfg.optimization = OmegaConf.merge(cfg.optimization, cfg.task.optimization)
+
     # Print config
     print("=" * 80)
     print("Training Configuration")
@@ -267,6 +273,9 @@ def main(cfg: DictConfig):
         # MeanFlow Stable parameters
         "time_steps": cfg.flow.get("time_steps", 0),
         "consistency_alpha": cfg.flow.get("consistency_alpha", 0.0),
+        # Drift policy parameters
+        "gen_per_label": cfg.flow.get("gen_per_label", 8),
+        "drift_temperatures": list(cfg.flow.get("drift_temperatures", [0.02, 0.05, 0.2])),
         # Store task info for evaluation
         "dataset_path": str(resolved_path),
         "env_name": cfg.task.env_name,
@@ -420,7 +429,7 @@ def main(cfg: DictConfig):
                         "train/lr": float(info.get("lr", cfg.optimization.lr)),
                         **{
                             f"train/{k}": float(info[k])
-                            for k in ("flow_matching_loss", "mf_term", "delta_t")
+                            for k in ("flow_matching_loss", "mf_term", "delta_t", "drift_scale")
                             if k in info
                         },
                     },
@@ -516,7 +525,7 @@ def main(cfg: DictConfig):
                 )
 
         # Environment evaluation
-        if step % cfg.eval.eval_interval == 0 and step > 0 and eval_env is not None:
+        if cfg.eval.eval_interval > 0 and step % cfg.eval.eval_interval == 0 and step > 0 and eval_env is not None:
             print(f"\n[Step {step}] Running environment evaluation...")
             eval_count += 1
 

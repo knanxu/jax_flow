@@ -360,7 +360,8 @@ class PushTDataset:
                 "action": self.action_normalizer,
             }
 
-    def sample_sequence(self, batch_size, discount=0.99, rng=None, reward_offset=0.0):
+    def sample_sequence(self, batch_size, discount=0.99, rng=None, reward_offset=0.0,
+                         act_exec_steps=None):
         """Sample action-chunk sequences for offline RL training.
 
         Uses precomputed dense coverage rewards instead of sparse terminal reward.
@@ -370,6 +371,8 @@ class PushTDataset:
             discount: Discount factor for cumulative reward.
             rng: NumPy random generator (optional).
             reward_offset: Added to raw rewards (e.g. -1.0 for DSRL style).
+            act_exec_steps: Number of actually executed steps for RL reward/next_obs.
+                If None, defaults to self.horizon (backward compatible).
 
         Returns:
             dict with keys matching RobomimicDataset.sample_sequence.
@@ -403,7 +406,9 @@ class PushTDataset:
         next_obs_batch = []
         mask_batch = []
 
-        discount_powers = discount ** np.arange(self.horizon)
+        # RL transition length: act_exec_steps for reward/next_obs, horizon for actions
+        rl_steps = act_exec_steps if act_exec_steps is not None else self.horizon
+        discount_powers = discount ** np.arange(rl_steps)
 
         for ep_idx in ep_indices:
             ep_act = self.episode_actions[ep_idx]
@@ -416,20 +421,20 @@ class PushTDataset:
             # --- Observations ---
             obs = self._build_obs_for_rl(ep_idx, t)
 
-            # --- Actions ---
+            # --- Actions: full horizon (needed for BC loss) ---
             actions = ep_act[t : t + self.horizon]
 
-            # --- Rewards: dense coverage + offset ---
-            chunk_rewards = ep_rew[t : t + self.horizon] + reward_offset
+            # --- Rewards: only over rl_steps (actual execution window) ---
+            chunk_rewards = ep_rew[t : t + rl_steps] + reward_offset
             cum_reward = np.sum(chunk_rewards * discount_powers)
 
-            # --- Next observations ---
-            last_t = t + self.horizon - 1
+            # --- Next observations: after rl_steps ---
+            last_t = t + rl_steps - 1
             next_t = min(last_t + 1, ep_len - 1)
             next_obs = self._build_obs_for_rl(ep_idx, next_t)
 
-            # --- Mask: 0 if episode ends within chunk ---
-            mask = 1.0 if (t + self.horizon - 1) < (ep_len - 1) else 0.0
+            # --- Mask: 0 if episode ends within rl_steps ---
+            mask = 1.0 if (t + rl_steps - 1) < (ep_len - 1) else 0.0
 
             obs_batch.append(obs)
             act_batch.append(actions)

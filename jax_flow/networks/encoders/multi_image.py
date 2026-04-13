@@ -19,7 +19,7 @@ class MultiImageEncoder(nn.Module):
     """Multi-modal encoder for images + lowdim observations.
 
     Encodes multiple camera views and low-dimensional state into a
-    single feature vector (or patch features + prop for SpatialEmbCritic).
+    single feature vector (or patch features + prop).
 
     When return_patches=True, returns a tuple:
         (patch_features: (batch, total_patches, embed_dim),

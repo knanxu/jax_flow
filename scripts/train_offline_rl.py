@@ -2,7 +2,7 @@
 
 Two-phase training:
   Phase 1: BCAgent trains actor (100% identical to train_bc.py) + CriticState trains critic
-  Phase 2: OfflineRLAgent jointly optimizes actor (Q+BC loss) and critic
+  Phase 2: DDPGBCAgent jointly optimizes actor (Q+BC loss) and critic
 
 Usage:
     # Mode 1: BC warmup -> RL
@@ -27,12 +27,12 @@ from tqdm import tqdm
 
 from jax_flow.agents.bc_agent import BCAgent
 from jax_flow.agents.critic_state import CriticState
-from jax_flow.agents.offline_rl_agent import OfflineRLAgent
+from jax_flow.agents.offline_online.ddpg_bc_agent import DDPGBCAgent
 from jax_flow.core.checkpoint import (
     cleanup_old_checkpoints,
     load_checkpoint,
     save_checkpoint,
-    save_offline_rl_checkpoint,
+    save_ddpg_bc_checkpoint,
 )
 from jax_flow.core.evaluation import evaluate_policy, print_evaluation_results
 from jax_flow.data import DatasetManager, make_dataset, make_robomimic_dataset
@@ -50,7 +50,7 @@ def create_bc_config(bc_ckpt_config):
 
 
 def create_rl_config(bc_ckpt_config, algo_cfg, task_cfg):
-    """Build OfflineRLAgent config for RL phase."""
+    """Build DDPGBCAgent config for RL phase."""
     critic_encoder_type = algo_cfg.get("critic_encoder_type", "none")
     return {
         # From BC config (needed for sampler/loss)
@@ -122,7 +122,7 @@ def create_critic_config(algo_cfg, bc_ckpt_config):
 
 
 @hydra.main(
-    version_base=None, config_path="../configs", config_name="offline_rl_default"
+    version_base=None, config_path="../configs/offline_online", config_name="ddpg_bc_default"
 )
 def main(cfg: DictConfig):
     """Main offline RL training function."""
@@ -296,12 +296,15 @@ def main(cfg: DictConfig):
     # ================================================================
     # Helper: sample batch
     # ================================================================
+    act_exec_steps = algo.get("act_exec_steps", cfg.task.dataset.act_steps)
+
     def sample_batch():
         batch_np = train_dataset.sample_sequence(
             batch_size=batch_size,
             discount=algo.get("discount", 0.99),
             rng=rng_np,
             reward_offset=reward_offset,
+            act_exec_steps=act_exec_steps,
         )
         if isinstance(batch_np["observations"], dict):
             obs = {k: jnp.array(v) for k, v in batch_np["observations"].items()}
@@ -446,16 +449,16 @@ def main(cfg: DictConfig):
         pbar.close()
         print(f"\nBC warmup complete. Best success rate: {best_success_rate:.2%}")
 
-        # Create OfflineRLAgent from BCAgent + CriticState
-        print("\nCreating OfflineRLAgent from BC + Critic...")
+        # Create DDPGBCAgent from BCAgent + CriticState
+        print("\nCreating DDPGBCAgent from BC + Critic...")
         rl_config = create_rl_config(bc_ckpt_config, algo, cfg.task)
-        rl_agent = OfflineRLAgent.create_from_bc(
+        rl_agent = DDPGBCAgent.create_from_bc(
             seed=cfg.seed + 2,
             bc_agent=bc_agent,
             critic_state=critic_state,
             config=rl_config,
         )
-        print("OfflineRLAgent created from BC warmup.")
+        print("DDPGBCAgent created from BC warmup.")
 
     else:
         # Mode 2: Direct RL (no BC warmup)
@@ -464,14 +467,14 @@ def main(cfg: DictConfig):
         print("=" * 80)
 
         rl_config = create_rl_config(bc_ckpt_config, algo, cfg.task)
-        rl_agent = OfflineRLAgent.create(
+        rl_agent = DDPGBCAgent.create(
             seed=cfg.seed,
             ex_observations=ex_obs,
             ex_actions=ex_actions,
             config=rl_config,
             bc_checkpoint_path=bc_checkpoint_path,
         )
-        print("OfflineRLAgent created.")
+        print("DDPGBCAgent created.")
 
     # ================================================================
     # 8. Phase 2: RL training
@@ -514,7 +517,7 @@ def main(cfg: DictConfig):
         if eval_interval > 0 and step % eval_interval == 0 and step > 0:
             eval_results = run_eval(rl_agent, rl_step)
             if eval_results and eval_results["success_rate"] >= best_success_rate:
-                save_offline_rl_checkpoint(
+                save_ddpg_bc_checkpoint(
                     output_dir / "best_model.pkl",
                     rl_agent, rl_step,
                     bc_checkpoint_path=bc_checkpoint_path,
@@ -523,7 +526,7 @@ def main(cfg: DictConfig):
                 )
 
         if checkpoint_interval > 0 and step % checkpoint_interval == 0 and step > 0:
-            save_offline_rl_checkpoint(
+            save_ddpg_bc_checkpoint(
                 output_dir / f"rl_checkpoint_{rl_step}.pkl",
                 rl_agent, rl_step,
                 bc_checkpoint_path=bc_checkpoint_path,
@@ -536,7 +539,7 @@ def main(cfg: DictConfig):
     pbar.close()
 
     # Final save
-    save_offline_rl_checkpoint(
+    save_ddpg_bc_checkpoint(
         output_dir / "final_model.pkl",
         rl_agent, global_step,
         bc_checkpoint_path=bc_checkpoint_path,

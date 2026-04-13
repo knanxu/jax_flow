@@ -201,6 +201,35 @@ def meanflow_sampler(network, encoder, observations, num_steps, rng, config):
 
 
 
+def drift_sampler(network, encoder, observations, num_steps, rng, config):
+    """Drift policy single-step sampler (NFE=1).
+
+    Maps noise directly to actions in a single forward pass.
+    The num_steps parameter is ignored.
+
+    Args:
+        network: Flow network.
+        encoder: Observation encoder.
+        observations: Observations.
+        num_steps: Unused (always single-step).
+        rng: Random key.
+        config: Configuration dict.
+
+    Returns:
+        Sampled actions. Shape: (batch, horizon, action_dim)
+    """
+    batch_size = get_batch_size(observations)
+    horizon = config.get("horizon", 10)
+    action_dim = config.get("action_dim", 7)
+
+    cond = encoder(observations, training=False, rngs={})
+
+    noise = jax.random.normal(rng, (batch_size, horizon, action_dim))
+    s = jnp.zeros((batch_size,))
+    actions = network(noise, s, s, cond, training=False)
+    return actions
+
+
 def get_sampler(sampler_type="euler"):
     """Get sampler function by type."""
     if sampler_type == "euler":
@@ -213,5 +242,7 @@ def get_sampler(sampler_type="euler"):
         return meanflow_sampler
     elif sampler_type == "meanflow_stable":
         return meanflow_sampler_stable
+    elif sampler_type == "drift":
+        return drift_sampler
     else:
         raise ValueError(f"Unknown sampler type: {sampler_type}")

@@ -45,3 +45,7 @@ abs_action: true
 # Task-specific parameters
 task_horizon: 400
 success_threshold: 0.9
+
+# Task-specific optimization overrides
+optimization:
+  batch_size: 64

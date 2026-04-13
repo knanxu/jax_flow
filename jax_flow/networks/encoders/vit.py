@@ -2,7 +2,7 @@
 
 Lightweight Vision Transformer for robotic manipulation tasks.
 Uses double-conv patch embedding and pre-norm transformer blocks.
-Supports both pooled output (for BC pipeline) and patch output (for SpatialEmbCritic).
+Supports both pooled output (for BC pipeline) and patch output.
 """
 
 import flax.linen as nn
@@ -102,7 +102,7 @@ class MinViTEncoder(nn.Module):
 
     Two output modes:
         - return_patches=False: mean pool → Dense(output_dim) → (batch, output_dim)
-        - return_patches=True: (batch, num_patches, embed_dim) for SpatialEmbCritic
+        - return_patches=True: (batch, num_patches, embed_dim)
     """
 
     embed_dim: int = 128

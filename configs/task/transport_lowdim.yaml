@@ -36,3 +36,7 @@ obs_keys:
   - robot1_eef_quat
   - robot1_gripper_qpos
   - object
+
+# Task-specific optimization overrides
+optimization:
+  batch_size: 1024

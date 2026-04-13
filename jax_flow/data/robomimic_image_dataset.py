@@ -393,7 +393,8 @@ class RobomimicImageDataset:
 
         return observations
 
-    def sample_sequence(self, batch_size, discount=0.99, rng=None, reward_offset=None):
+    def sample_sequence(self, batch_size, discount=0.99, rng=None, reward_offset=None,
+                         act_exec_steps=None):
         """Sample action-chunk sequences for offline RL training.
 
         Per-episode sampling, never crosses episode boundaries.
@@ -402,6 +403,8 @@ class RobomimicImageDataset:
             batch_size: Number of sequences to sample.
             discount: Discount factor for cumulative reward.
             rng: NumPy random generator (optional).
+            act_exec_steps: Number of actually executed steps for RL reward/next_obs.
+                If None, defaults to self.horizon (backward compatible).
 
         Returns:
             dict with keys:
@@ -441,7 +444,9 @@ class RobomimicImageDataset:
         rew_batch = []
         mask_batch = []
 
-        discount_powers = discount ** np.arange(self.horizon)
+        # RL transition length: act_exec_steps for reward/next_obs, horizon for actions
+        rl_steps = act_exec_steps if act_exec_steps is not None else self.horizon
+        discount_powers = discount ** np.arange(rl_steps)
 
         for ep_idx in ep_indices:
             ep_act = self.episode_actions[ep_idx]
@@ -457,22 +462,22 @@ class RobomimicImageDataset:
             for key in obs_hist:
                 obs_batch[key].append(obs_hist[key])
 
-            # Action chunk
+            # Action chunk: full horizon (needed for BC loss)
             actions = ep_act[t : t + self.horizon]
             act_batch.append(actions)
 
-            # Cumulative discounted reward
-            chunk_rewards = ep_rew[t : t + self.horizon]
+            # Cumulative discounted reward over rl_steps (actual execution window)
+            chunk_rewards = ep_rew[t : t + rl_steps]
             rew_batch.append(np.sum(chunk_rewards * discount_powers))
 
-            # Next obs history at chunk end
-            last_t = t + self.horizon - 1
+            # Next obs history after rl_steps
+            last_t = t + rl_steps - 1
             next_obs_hist = self._build_next_obs_history(ep_idx, last_t)
             for key in next_obs_hist:
                 next_obs_batch[key].append(next_obs_hist[key])
 
-            # Mask
-            chunk_dones = ep_done[t : t + self.horizon]
+            # Mask: 0 if any terminal within rl_steps, else 1
+            chunk_dones = ep_done[t : t + rl_steps]
             mask_batch.append(1.0 - float(np.any(chunk_dones > 0)))
 
         # Stack and normalize

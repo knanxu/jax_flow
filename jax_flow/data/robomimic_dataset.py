@@ -250,7 +250,8 @@ class RobomimicDataset:
             obs_list.append(ep_obs[obs_t])
         return np.stack(obs_list, axis=0)
 
-    def sample_sequence(self, batch_size, discount=0.99, rng=None, reward_offset=None):
+    def sample_sequence(self, batch_size, discount=0.99, rng=None, reward_offset=None,
+                         act_exec_steps=None):
         """Sample action-chunk sequences for offline RL training.
 
         Per-episode sampling: randomly selects episodes (weighted by valid
@@ -261,14 +262,16 @@ class RobomimicDataset:
             batch_size: Number of sequences to sample.
             discount: Discount factor for cumulative reward.
             rng: NumPy random generator (optional).
+            act_exec_steps: Number of actually executed steps for RL reward/next_obs.
+                If None, defaults to self.horizon (backward compatible).
 
         Returns:
             dict with keys:
                 observations: (B, obs_steps, obs_dim) — obs history at chunk start
                 actions: (B, horizon, action_dim) — full action chunk (for BC loss)
-                rewards: (B,) — cumulative discounted reward over chunk
-                next_observations: (B, obs_steps, obs_dim) — obs history at chunk end
-                masks: (B,) — 0 if terminal within chunk, else 1
+                rewards: (B,) — cumulative discounted reward over act_exec_steps
+                next_observations: (B, obs_steps, obs_dim) — obs history after act_exec_steps
+                masks: (B,) — 0 if terminal within act_exec_steps, else 1
         """
         if rng is None:
             rng = np.random.default_rng()
@@ -298,7 +301,9 @@ class RobomimicDataset:
         next_obs_batch = []
         mask_batch = []
 
-        discount_powers = discount ** np.arange(self.horizon)
+        # RL transition length: act_exec_steps for reward/next_obs, horizon for actions
+        rl_steps = act_exec_steps if act_exec_steps is not None else self.horizon
+        discount_powers = discount ** np.arange(rl_steps)
 
         for ep_idx in ep_indices:
             ep_obs = self.episode_obs[ep_idx]
@@ -315,31 +320,26 @@ class RobomimicDataset:
             # Observation history at chunk start
             obs_history = self._build_obs_history(ep_obs, t)
 
-            # Action chunk: [act[t], ..., act[t+horizon-1]]
+            # Action chunk: full horizon (needed for BC loss)
             actions = ep_act[t : t + self.horizon]
 
-            # Cumulative discounted reward over chunk
-            chunk_rewards = ep_rew[t : t + self.horizon]
+            # Cumulative discounted reward over rl_steps (actual execution window)
+            chunk_rewards = ep_rew[t : t + rl_steps]
             cum_reward = np.sum(chunk_rewards * discount_powers)
 
-            # Next observation history at chunk end (after last step)
-            # Use next_obs of the last step in the chunk
-            last_t = t + self.horizon - 1
-            # Build obs history for next state: use next_obs[last_t] as the
-            # most recent obs, and ep_obs[last_t], ep_obs[last_t-1], ... for history
+            # Next observation history after rl_steps
+            last_t = t + rl_steps - 1
             next_obs_list = []
             for i in range(self.obs_steps):
                 if i < self.obs_steps - 1:
-                    # History steps: use ep_obs shifted by 1
                     hist_t = max(last_t + 1 - (self.obs_steps - 1 - i), 0)
                     next_obs_list.append(ep_obs[min(hist_t, ep_len - 1)])
                 else:
-                    # Most recent: use next_obs of last step
                     next_obs_list.append(ep_next_obs[last_t])
             next_obs_history = np.stack(next_obs_list, axis=0)
 
-            # Mask: 0 if any terminal within chunk, else 1
-            chunk_dones = ep_done[t : t + self.horizon]
+            # Mask: 0 if any terminal within rl_steps, else 1
+            chunk_dones = ep_done[t : t + rl_steps]
             mask = 1.0 - float(np.any(chunk_dones > 0))
 
             obs_batch.append(obs_history)

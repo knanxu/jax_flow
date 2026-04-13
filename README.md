@@ -31,17 +31,40 @@ pip install -e ".[kitchen]"
 pip install -e ".[all]"
 ```
 
-MimicGen 特有环境（coffee, threading, hammer_cleanup 等）需额外安装 mimicgen 包：
+### MimicGen / DexMimicGen 环境兼容性
+
+MimicGen 1.0.1 与 robosuite 1.5.2 存在 API 不兼容问题。本项目通过内置兼容性 shim 自动解决，但需要从源码安装 mimicgen（pip 安装的版本缺少 XML/mesh assets）。
+
+**MimicGen 特有环境**（coffee, threading, stack_three, mug_cleanup 等）：
 
 ```bash
-pip install "mimicgen @ git+https://github.com/NVlabs/mimicgen.git"
+# 从源码安装（推荐，包含完整 assets）
+git clone https://github.com/NVlabs/mimicgen.git
+pip install -e mimicgen/
+
+# 或使用已有源码目录
+pip install -e /path/to/mimicgen
 ```
 
-DexMimicGen 双臂任务需额外安装 dexmimicgen 包：
+**DexMimicGen 双臂任务**（two_arm_threading, two_arm_three_piece_assembly, two_arm_transport）：
 
 ```bash
 pip install -e /path/to/dexmimicgen
 ```
+
+**兼容性说明**：
+
+项目内置的 `jax_flow/envs/mimicgen_compat.py` 会自动处理以下问题：
+1. robosuite 1.5 移除了 `SingleArmEnv` 类 → 注入兼容 shim
+2. `mount_types` 参数改名为 `base_types` → 自动映射
+3. `robot.controller` 改为 `robot.part_controllers` → 添加后向兼容属性
+
+训练 MimicGen 任务时会自动触发兼容性 patch，无需手动操作。
+
+**已验证任务**：
+- ✅ Threading, Coffee, StackThree, MugCleanup, ThreePieceAssembly, NutAssembly
+- ✅ DexMimicGen 全部双臂任务
+- ❌ HammerCleanup, Kitchen（MimicGen 版）需要额外安装 `robosuite_task_zoo`（暂不支持）
 
 ## Datasets
 

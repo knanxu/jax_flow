@@ -460,6 +460,12 @@ def make_robomimic_env(
     import robomimic.utils.file_utils as FileUtils
     import robomimic.utils.obs_utils as ObsUtils
 
+    # Register MimicGen environments if needed
+    from jax_flow.envs.mimicgen_compat import MIMICGEN_ENVS, ensure_mimicgen_compat
+
+    if env_name in MIMICGEN_ENVS:
+        ensure_mimicgen_compat()
+
     # Auto-fill defaults from DexMimicGen registry if env_name matches
     if env_name in DEXMIMICGEN_ENVS:
         defaults = DEXMIMICGEN_ENVS[env_name]

@@ -34,3 +34,7 @@ env:
 
 # Observation and action dimensions (image mode uses dict obs)
 act_dim: 2
+
+# Task-specific optimization overrides
+optimization:
+  batch_size: 64

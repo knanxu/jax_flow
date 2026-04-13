@@ -1,10 +1,10 @@
-"""Offline RL Agent: DDPG + BC constraint on flow policy.
+"""DDPGBCAgent: DDPG + BC constraint on flow policy.
 
 Two-phase training:
   Phase 1 (BC warmup): BCAgent trains actor, CriticState trains critic in parallel.
-  Phase 2 (RL): OfflineRLAgent optimizes actor (Q+BC loss) and critic (TD loss).
+  Phase 2 (RL): DDPGBCAgent optimizes actor (Q+BC loss) and critic (TD loss).
 
-Follows the ACFQL grad_params pattern: separate critic_loss / actor_loss methods,
+Uses the grad_params pattern: separate critic_loss / actor_loss methods,
 each selectively routing gradients via params=grad_params.
 """
 
@@ -32,7 +32,7 @@ from jax_flow.networks.value import Value
 logger = logging.getLogger(__name__)
 
 
-class OfflineRLAgent(flax.struct.PyTreeNode):
+class DDPGBCAgent(flax.struct.PyTreeNode):
     """Offline RL agent for the RL phase.
 
     Single ModuleDict TrainState: encoder + flow + critic + target_critic.
@@ -54,7 +54,7 @@ class OfflineRLAgent(flax.struct.PyTreeNode):
 
     @classmethod
     def create_from_bc(cls, seed, bc_agent, critic_state, config):
-        """Create OfflineRLAgent from trained BCAgent + CriticState.
+        """Create DDPGBCAgent from trained BCAgent + CriticState.
 
         Args:
             seed: Random seed.
@@ -63,7 +63,7 @@ class OfflineRLAgent(flax.struct.PyTreeNode):
             config: RL phase config dict.
 
         Returns:
-            New OfflineRLAgent.
+            New DDPGBCAgent.
         """
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng)
@@ -141,7 +141,7 @@ class OfflineRLAgent(flax.struct.PyTreeNode):
 
     @classmethod
     def create(cls, seed, ex_observations, ex_actions, config, bc_checkpoint_path=None):
-        """Create OfflineRLAgent from scratch (mode 2: direct RL, no BC warmup).
+        """Create DDPGBCAgent from scratch (mode 2: direct RL, no BC warmup).
 
         Args:
             seed: Random seed.
@@ -151,7 +151,7 @@ class OfflineRLAgent(flax.struct.PyTreeNode):
             bc_checkpoint_path: Path to BC checkpoint (for network architecture).
 
         Returns:
-            New OfflineRLAgent.
+            New DDPGBCAgent.
         """
         from jax_flow.networks.encoders import create_encoder
 
@@ -411,7 +411,7 @@ class OfflineRLAgent(flax.struct.PyTreeNode):
           - critic (Q path): frozen (evaluator, no grad_params)
         """
         config = self.config
-        alpha = config.get("alpha", 1.0)
+        alpha = config.get("alpha", 10000.0)
         q_weight = config.get("q_weight", 1.0)
         normalize_q = config.get("normalize_q_loss", True)
         freeze_encoder = config.get("freeze_encoder", True)

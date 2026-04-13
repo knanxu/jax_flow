@@ -47,3 +47,7 @@ abs_action: true
 # Task-specific parameters
 task_horizon: 400      # Maximum episode length
 success_threshold: 0.9 # Success rate threshold
+
+# Task-specific optimization overrides
+optimization:
+  batch_size: 1024

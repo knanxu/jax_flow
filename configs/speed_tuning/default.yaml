@@ -6,8 +6,8 @@ algorithm:
   bc_checkpoint: null  # Required: path to trained BC checkpoint
 
   # Speed options: range [1.0, max_speed] with given granularity
-  max_speed: 2.0
-  speed_granularity: 0.1  # produces [1.0, 1.1, 1.2, ..., 2.0]
+  max_speed: 4.0
+  speed_granularity: 0.1  # produces [1.0, 1.1, 1.2, ..., 4.0]
 
   # Frame skip: speed policy called every k_skip env steps
   k_skip: 4

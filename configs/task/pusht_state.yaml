@@ -25,3 +25,7 @@ env:
 # Observation and action dimensions
 obs_dim: 5
 act_dim: 2
+
+# Task-specific optimization overrides
+optimization:
+  batch_size: 1024

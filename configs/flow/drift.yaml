@@ -1,0 +1,21 @@
+# Drift Policy configuration
+# Single-step generation via particle-based drift forces (NFE=1)
+# Reference: phamtrongthang123/drifting_policy
+
+name: drift
+policy_type: drift
+
+interp_type: linear  # unused but kept for compatibility
+
+sampler:
+  type: drift
+  num_steps: 1
+  sample_mode: stochastic
+
+loss:
+  scale: 1.0
+
+gen_per_label: 8
+drift_temperatures: [0.02, 0.05, 0.2]
+
+use_ema: true
