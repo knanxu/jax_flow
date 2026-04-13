@@ -18,7 +18,7 @@ Build a high-quality, reusable JAX codebase for robotics research with:
 3. **Multiple networks**: MLP (priority), UNet, Transformer (DiT)
 4. **Full environment support**: Robomimic MimicGen DexMimicGen Push-T Kitchen (lowdim + image)
 5. **Clean config management**: Hydra + OmegaConf (YAML configs)
-6. **Offline-to-online RL**: ACFQL and DQC algorithms from qc/dqc projects
+6. **Offline RL**: DDPG + BC constraint (DDPGBCAgent)
 7. **Extensibility**: Standard agent design (jaxrl_m, qc patterns)
 
 ### Commands
@@ -64,16 +64,7 @@ python scripts/train_bc.py task=lift_lowdim wandb.enabled=false
 # Adjust evaluation frequency
 python scripts/train_bc.py task=lift_lowdim eval.eval_interval=20000
 
-# ACFQL: offline-to-online RL with action chunking
-python scripts/train_acfql.py --config-name acfql_default task=square_lowdim
-python scripts/train_acfql.py --config-name acfql_default task=square_lowdim algorithm.actor_type=distill-ddpg
-
-# DQC: decoupled Q-chunking (offline)
-python scripts/train_dqc.py --config-name dqc_default task=square_lowdim
-python scripts/train_dqc.py --config-name dqc_default task=square_lowdim algorithm.backup_horizon=25 algorithm.policy_chunk_size=5
-
 # Offline RL: DDPG + BC on flow policy
-# 详见下方 "Offline RL Training" 章节
 python scripts/train_offline_rl.py task=square_lowdim algorithm.bc_checkpoint=path/to/bc/best_model.pkl
 
 # Push-T: state/keypoint/image observations
@@ -83,6 +74,13 @@ python scripts/train_bc.py task=pusht_image
 
 # Kitchen: state observations with p1-p7 metrics
 python scripts/train_bc.py task=kitchen_state
+
+# SpeedTuning: Rainbow DQN speed adjustment on frozen BC policy
+python scripts/train_speed_tuning.py task=square_lowdim \
+    algorithm.bc_checkpoint=path/to/bc/best_model.pkl
+python scripts/train_speed_tuning.py task=square_lowdim \
+    algorithm.bc_checkpoint=path/to/bc/best_model.pkl \
+    algorithm.max_speed=3.0 algorithm.speed_granularity=0.2
 ```
 
 ### Evaluation
@@ -167,10 +165,17 @@ pyright jax_flow/
 
 2. **Agents** (`jax_flow/agents/`)
    - `BCAgent`: Flow matching BC, immutable PyTreeNode。图像任务使用 GroupNorm ResNet18（从头训练，统一 LR，对齐 Diffusion Policy）
-   - `ResFiTAgent`: Residual RL fine-tuning (TD3 + RED-Q + 残差动作), 3 独立 TrainState
-   - `OfflineRLAgent`: Offline RL (DDPG + BC constraint)，单 ModuleDict TrainState + multi_transform optimizer，冻结 encoder，联合优化 flow policy (Q loss + BC loss) + critic
-   - `ACFQLAgent`: Offline-to-online RL (待完善)
+   - `DDPGBCAgent`: Offline RL (DDPG + BC constraint)，单 ModuleDict TrainState + multi_transform optimizer，冻结 encoder，联合优化 flow policy (Q loss + BC loss) + critic
+   - `CriticState`: Critic 训练状态管理，用于 BC warmup 阶段
+   - `RainbowDQNAgent`: SpeedTuning 速度策略（Rainbow DQN: Double Q + C51 分布式 Q + Dueling 架构），冻结 BC encoder，离散速度动作空间，PER 外部管理
    - Pattern: `create()` → `update(batch)` → `sample_actions(obs)`
+
+3. **SpeedTuning** (`jax_flow/agents/speed_tuning/`)
+   - `rainbow_agent.py`: RainbowDQNAgent，复用 BC encoder（冻结），DuelingC51Network 输出速度离散动作
+   - `networks.py`: DuelingC51Network（Dueling + C51 分布式 Q-learning，num_atoms=51）
+   - `speed_tuning_env.py`: SpeedTuningEnvWrapper，封装冻结 BC 策略 + 线性时间插值 + k_skip 步执行
+   - `per_buffer.py`: SumTree + PrioritizedReplayBuffer（优先经验回放）
+   - `interpolation.py`: temporal_interpolate（线性时间插值）+ make_speed_options（速度范围生成，min=1.0）
 
 3. **Flow Matching** (`jax_flow/flow/`)
    - `interpolant.py`: Linear / trigonometric interpolation
@@ -183,9 +188,6 @@ pyright jax_flow/
    - `unet.py`: 1D UNet (对齐 ChiUNet from much-ado-about-noising)，dim_mult 控制通道倍增，GELU 激活，FiLM conditioning
    - `transformer.py`: DiT-style transformer
    - `value.py`: Q-function ensemble (nn.vmap), 支持 RED-Q (num_ensembles=10)
-   - `residual_actor.py`: 残差策略网络 + `add_exploration_noise()` 探索噪声
-   - `spatial_emb_actor.py`: SpatialEmbResidualActor — image 模式下 actor 独立 spatial embedding（不依赖 critic trunk）
-   - `spatial_emb_critic.py`: SpatialEmbCritic + `redq_q_value` / `ensemble_mean_q` 工具函数
    - `embeddings.py`: Fourier / Learned timestep embeddings
    - `encoders/`: ResNet18Encoder (GroupNorm, 完整 layer1-4), SpatialSoftmax, MultiImageEncoder, MinViTEncoder, RandomShiftsAug
 
@@ -198,13 +200,11 @@ pyright jax_flow/
    - `normalizer.py`: MinMax, Image, Identity normalizers
    - `dataset_manager.py`: 自动下载和路径解析，支持 robomimic/mimicgen/dexmimicgen/pusht/kitchen，智能处理 image 数据集
    - `replay_buffer.py`: NumPy 环形 replay buffer, 支持 dict obs + N-step returns + offline 填充
-   - `resfit_replay_buffer.py`: ResFiT 专用 buffer，独立存储 base_action/next_base_action（不塞在 obs dict 里）
 
 6. **Environments** (`jax_flow/envs/`)
    - `robomimic_env.py`: RobomimicWrapper, RobomimicImageWrapper, FrameStackWrapper, ActionChunkingWrapper, DEXMIMICGEN_ENVS 注册表（自动推断双臂 obs/image keys）
    - `pusht/`: Push-T 环境（pymunk 物理引擎），支持 state(5D)/keypoint(20D)/image obs，PushTWrapper 归一化 + success 判定
    - `kitchen/`: Kitchen 环境（MuJoCo Franka），thirdparty/ 包含完整 adept_envs，KitchenWrapper 桥接 old gym → Gymnasium + p1-p7 指标
-   - `residual_wrapper.py`: ResidualEnvWrapper — 内嵌冻结 BC 策略，管理 action queue，RL agent 只输出单步残差
 
 7. **Configuration** (`configs/`)
    - Hydra + OmegaConf, YAML 格式
@@ -260,7 +260,6 @@ configs/
 
 ## References
 
-- **qc (ACFQL)**: Agent design, TrainState, ACFQL algorithm
 - **much-ado-about-noising**: Flow matching methods (MIP, MeanFlow)
 - **Diffusion Policy**: Action chunking, UNet, obs_steps/horizon/act_steps 设计
 - **jaxrl_m**: JAX RL patterns, ensemblize

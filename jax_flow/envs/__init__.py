@@ -1,6 +1,6 @@
 """Environment utilities."""
 
-from jax_flow.envs.residual_wrapper import ResidualEnvWrapper
+from jax_flow.agents.speed_tuning.speed_tuning_env import SpeedTuningEnvWrapper
 from jax_flow.envs.robomimic_env import (
     ActionChunkingWrapper,
     FrameStackWrapper,
@@ -35,7 +35,7 @@ __all__ = [
     "RobomimicImageWrapper",
     "FrameStackWrapper",
     "ActionChunkingWrapper",
-    "ResidualEnvWrapper",
+    "SpeedTuningEnvWrapper",
     "make_robomimic_env",
     "make_env",
 ]
