@@ -54,6 +54,7 @@ eval:
   num_episodes: 20
   save_video: true
   num_videos: 3
+  video_fps: 30
 
 checkpoint:
   save_freq: 500  # save every N episodes
@@ -63,6 +64,7 @@ wandb:
   enabled: false
   project: jax_flow
   entity: null
+  log_videos: true
 
 seed: 0
 checkpoint_dir: checkpoints

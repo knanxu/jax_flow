@@ -111,7 +111,10 @@ def get_obs_shape(env):
     return obs.shape
 
 
-def evaluate_speed_policy(agent, eval_env, num_episodes=20, max_steps=500):
+def evaluate_speed_policy(
+    agent, eval_env, num_episodes=20, max_steps=500,
+    save_video=False, num_videos=3,
+):
     """Evaluate the speed tuning policy.
 
     Key metrics (ordered by importance):
@@ -121,7 +124,7 @@ def evaluate_speed_policy(agent, eval_env, num_episodes=20, max_steps=500):
       4. avg_return: cumulative r_ST (speed reward + task reward)
       5. speed distribution: per-episode speed stats
 
-    Returns dict with all metrics.
+    Returns dict with all metrics (and optional videos).
     """
     successes = []
     lengths = []
@@ -130,6 +133,7 @@ def evaluate_speed_policy(agent, eval_env, num_episodes=20, max_steps=500):
     ep_speed_maxs = []
     success_lengths = []
     failure_lengths = []
+    videos = []
 
     for ep in range(num_episodes):
         obs, _ = eval_env.reset(seed=ep)
@@ -138,6 +142,8 @@ def evaluate_speed_policy(agent, eval_env, num_episodes=20, max_steps=500):
         ep_length = 0
         ep_success = False
         ep_speeds = []
+        save_this_video = save_video and ep < num_videos
+        frames = [] if save_this_video else None
 
         while not done and ep_length < max_steps:
             if isinstance(obs, dict):
@@ -157,6 +163,11 @@ def evaluate_speed_policy(agent, eval_env, num_episodes=20, max_steps=500):
             if "success" in info and bool(info["success"]):
                 ep_success = True
 
+            if save_this_video:
+                frame = eval_env.render()
+                if frame is not None:
+                    frames.append(frame)
+
         successes.append(ep_success)
         lengths.append(ep_length)
         returns.append(ep_return)
@@ -167,6 +178,9 @@ def evaluate_speed_policy(agent, eval_env, num_episodes=20, max_steps=500):
             success_lengths.append(ep_length)
         else:
             failure_lengths.append(ep_length)
+
+        if save_this_video and frames:
+            videos.append(np.array(frames))
 
     results = {
         # Primary metrics
@@ -190,6 +204,10 @@ def evaluate_speed_policy(agent, eval_env, num_episodes=20, max_steps=500):
         "std_speed": float(np.std(ep_speed_means)),
         "max_speed_used": float(np.max(ep_speed_maxs)) if ep_speed_maxs else 1.0,
     }
+
+    if videos:
+        results["videos"] = videos
+
     return results
 
 
@@ -587,6 +605,8 @@ def main(cfg: DictConfig):
                 eval_env=eval_env,
                 num_episodes=cfg.eval.get("num_episodes", 20),
                 max_steps=max_steps,
+                save_video=cfg.eval.get("save_video", True),
+                num_videos=cfg.eval.get("num_videos", 3),
             )
             print(
                 f"  Success: {eval_results['success_rate']:.2%} "
@@ -611,6 +631,26 @@ def main(cfg: DictConfig):
                     },
                     step=episode,
                 )
+
+                # Upload eval videos
+                if (
+                    cfg.wandb.get("log_videos", True)
+                    and "videos" in eval_results
+                ):
+                    video_fps = cfg.eval.get("video_fps", 30)
+                    for i, video_frames in enumerate(eval_results["videos"]):
+                        # video_frames: (T, H, W, C) -> (T, C, H, W)
+                        video_frames_t = np.transpose(video_frames, (0, 3, 1, 2))
+                        wandb.log(
+                            {
+                                f"eval/video_{i}": wandb.Video(
+                                    video_frames_t,
+                                    fps=video_fps,
+                                    format="mp4",
+                                )
+                            },
+                            step=episode,
+                        )
 
             if eval_results["success_rate"] > best_success_rate:
                 best_success_rate = eval_results["success_rate"]
