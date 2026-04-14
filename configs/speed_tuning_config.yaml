@@ -13,7 +13,7 @@ algorithm:
   k_skip: 4
 
   # Reward: r_ST = alpha * v^beta + r_task
-  alpha: 0.1
+  alpha: 0.0001
   beta: 2.0
 
   # Rainbow DQN
@@ -39,9 +39,9 @@ algorithm:
   epsilon_decay_steps: 50000
 
   # Training
-  batch_size: 256
-  total_episodes: 5000
-  learning_starts: 1000  # min transitions before training
+  batch_size: 64
+  total_episodes: 10000
+  learning_starts: 10000  # min transitions before training
   train_freq: 4  # train every N env steps
   grad_clip_norm: 10.0
   freeze_encoder: true
@@ -50,7 +50,7 @@ algorithm:
   log_interval: 100  # log every N episodes
 
 eval:
-  eval_interval: 200  # eval every N episodes
+  eval_interval: 1000  # eval every N episodes
   num_episodes: 20
   save_video: true
   num_videos: 3
