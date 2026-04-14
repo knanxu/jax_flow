@@ -13,7 +13,7 @@ algorithm:
   k_skip: 4
 
   # Reward: r_ST = alpha * v^beta + r_task
-  alpha: 0.1
+  alpha: 0.0001
   beta: 2.0
 
   # Rainbow DQN
@@ -50,7 +50,7 @@ algorithm:
   log_interval: 100  # log every N episodes
 
 eval:
-  eval_interval: 200  # eval every N episodes
+  eval_interval: 10000  # eval every N episodes
   num_episodes: 20
   save_video: true
   num_videos: 3

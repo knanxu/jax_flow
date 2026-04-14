@@ -488,24 +488,22 @@ def main(cfg: DictConfig):
             speed_idx = int(action[0])
             ep_speeds.append(speed_options[speed_idx])
 
-            # Execute macro-step and collect per-step transitions
-            next_obs, reward, terminated, truncated, info, transitions = (
-                train_env.step_with_transitions(speed_idx)
-            )
+            # Execute macro-step (k_skip env steps with interpolated BC actions)
+            prev_obs = obs if not isinstance(obs, dict) else {k: v.copy() for k, v in obs.items()}
+            next_obs, reward, terminated, truncated, info = train_env.step(speed_idx)
             done = terminated or truncated
             ep_return += reward
             ep_length += info.get("steps_executed", 1)
             global_step += info.get("steps_executed", 1)
 
-            # Store transitions in PER buffer
-            for trans in transitions:
-                per_buffer.add(
-                    obs=trans["obs"],
-                    action=trans["action"],
-                    reward=trans["reward"],
-                    next_obs=trans["next_obs"],
-                    done=trans["done"],
-                )
+            # Store ONE macro-step transition: (s, v, Σr, s', done)
+            per_buffer.add(
+                obs=prev_obs,
+                action=speed_idx,
+                reward=reward,
+                next_obs=next_obs if not isinstance(next_obs, dict) else {k: v.copy() for k, v in next_obs.items()},
+                done=done,
+            )
 
             # Train
             if len(per_buffer) >= learning_starts and global_step % train_freq == 0:
@@ -544,18 +542,8 @@ def main(cfg: DictConfig):
 
             obs = next_obs
 
-        # Episode stats
-        ep_success = (
-            any(
-                t.get("done", False)
-                for t in transitions
-                if not (terminated and not truncated)  # not a timeout
-            )
-            if transitions
-            else False
-        )
-        # Check info for success flag
-        ep_success = bool(info.get("success", ep_success))
+        # Episode stats — success is determined by the env info flag
+        ep_success = bool(info.get("success", False))
 
         episode_returns.append(ep_return)
         episode_lengths.append(ep_length)
