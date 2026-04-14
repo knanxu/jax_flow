@@ -154,65 +154,6 @@ class SpeedTuningEnvWrapper(gym.Wrapper):
 
         return obs, total_reward, terminated, truncated, info
 
-    def step_with_transitions(self, speed_idx):
-        """Execute one macro-step and return per-step transitions for PER.
-
-        Same as step() but also returns a list of single-step transitions
-        for storing in the replay buffer.
-
-        Returns:
-            (obs, total_reward, terminated, truncated, info, transitions)
-            where transitions is a list of dicts:
-              [{obs, action, reward, next_obs, done}, ...]
-        """
-        if speed_idx is not None:
-            self._current_speed = self.speed_options[int(speed_idx)]
-
-        obs = self._last_obs
-        obs_batch = self._batchify_obs(obs)
-        actions = self.bc_agent.eval_actions(obs_batch)
-        action_chunk = np.array(actions[0])
-
-        interpolated = self._interpolate(action_chunk)
-
-        exec_steps = min(self.k_skip, len(interpolated))
-        total_reward = 0.0
-        terminated = False
-        truncated = False
-        info = {}
-        transitions = []
-        prev_obs = obs
-
-        for i in range(exec_steps):
-            next_obs, r_task, terminated, truncated, info = self.env.step(
-                interpolated[i]
-            )
-            r_speed = self.alpha * (self._current_speed**self.beta)
-            r_st = r_speed + r_task
-            total_reward += r_st
-
-            transitions.append(
-                {
-                    "obs": self._copy_obs(prev_obs),
-                    "action": int(speed_idx) if speed_idx is not None else 0,
-                    "reward": r_st,
-                    "next_obs": self._copy_obs(next_obs),
-                    "done": terminated or truncated,
-                }
-            )
-
-            prev_obs = next_obs
-            if terminated or truncated:
-                break
-
-        self._last_obs = prev_obs
-        info["speed"] = self._current_speed
-        info["speed_idx"] = int(speed_idx) if speed_idx is not None else 0
-        info["interpolated_len"] = len(interpolated)
-        info["steps_executed"] = len(transitions)
-
-        return prev_obs, total_reward, terminated, truncated, info, transitions
-
     def _batchify_obs(self, obs):
         """Add batch dimension to observation."""
         if isinstance(obs, dict):
