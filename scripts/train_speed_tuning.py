@@ -39,14 +39,13 @@ from jax_flow.data import DatasetManager, make_dataset, make_robomimic_dataset
 from jax_flow.envs import make_env, make_robomimic_env
 
 
-def create_base_env(cfg, normalizers, resolved_path, abs_action=False):
+def create_base_env(cfg, normalizers, resolved_path, bc_ckpt_config, abs_action=False):
     """Create base env with FrameStack only (no ActionChunking).
 
-    SpeedTuningEnvWrapper manages action execution itself.
-    abs_action should match the BC checkpoint's setting, not the task config.
+    Uses bc_ckpt_config for obs_keys/image_keys/lowdim_keys to match eval_bc.py.
     """
     task_source = cfg.task.get("task_source", "robomimic")
-    obs_type = cfg.task.obs_type
+    obs_type = bc_ckpt_config.get("obs_type", cfg.task.obs_type)
     is_image = obs_type == "image"
 
     common_kwargs = {
@@ -54,7 +53,7 @@ def create_base_env(cfg, normalizers, resolved_path, abs_action=False):
         "action_normalizer": normalizers.get("action"),
         "lowdim_normalizer": normalizers.get("lowdim"),
         "max_episode_steps": cfg.task.env.max_episode_steps,
-        "frame_stack": cfg.task.dataset.obs_steps,
+        "frame_stack": bc_ckpt_config.get("obs_steps", cfg.task.dataset.obs_steps),
         "act_exec_steps": None,  # No ActionChunking — we handle it
         "seed": cfg.seed,
     }
@@ -67,32 +66,31 @@ def create_base_env(cfg, normalizers, resolved_path, abs_action=False):
             **common_kwargs,
         )
     else:
-        image_keys = None
-        lowdim_keys = None
+        # Read keys from checkpoint config (same as eval_bc.py)
         if is_image:
-            image_keys = tuple(cfg.task.dataset.get("image_keys", ["agentview_image"]))
+            image_keys = tuple(bc_ckpt_config.get("image_keys", ("agentview_image",)))
             lowdim_keys = tuple(
-                cfg.task.dataset.get(
+                bc_ckpt_config.get(
                     "lowdim_keys",
-                    ["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos"],
+                    ("robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos"),
+                )
+            )
+            obs_keys = None
+        else:
+            image_keys = None
+            lowdim_keys = None
+            obs_keys = tuple(
+                bc_ckpt_config.get(
+                    "obs_keys",
+                    ("robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"),
                 )
             )
 
         env = make_robomimic_env(
-            env_name=cfg.task.env_name,
+            env_name=bc_ckpt_config.get("env_name", cfg.task.env_name),
             dataset_path=resolved_path,
             obs_type=obs_type,
-            obs_keys=tuple(
-                cfg.task.dataset.get(
-                    "obs_keys",
-                    [
-                        "robot0_eef_pos",
-                        "robot0_eef_quat",
-                        "robot0_gripper_qpos",
-                        "object",
-                    ],
-                )
-            ),
+            obs_keys=obs_keys,
             image_keys=image_keys,
             lowdim_keys=lowdim_keys,
             render_offscreen=cfg.eval.get("save_video", True),
@@ -344,7 +342,7 @@ def main(cfg: DictConfig):
     # Use abs_action from BC checkpoint — determines whether env needs rot6d->axis_angle conversion
     bc_abs_action = bc_ckpt_config.get("abs_action", False)
 
-    train_env = create_base_env(cfg, normalizers, resolved_path, abs_action=bc_abs_action)
+    train_env = create_base_env(cfg, normalizers, resolved_path, bc_ckpt_config, abs_action=bc_abs_action)
     train_env = SpeedTuningEnvWrapper(
         env=train_env,
         bc_agent=bc_agent,
@@ -355,7 +353,7 @@ def main(cfg: DictConfig):
         abs_action=bc_abs_action,
     )
 
-    eval_env = create_base_env(cfg, normalizers, resolved_path, abs_action=bc_abs_action)
+    eval_env = create_base_env(cfg, normalizers, resolved_path, bc_ckpt_config, abs_action=bc_abs_action)
     eval_env = SpeedTuningEnvWrapper(
         env=eval_env,
         bc_agent=bc_agent,
