@@ -19,14 +19,12 @@ _DUAL_ARM_ROT6D_0 = (3, 9)
 _DUAL_ARM_ROT6D_1 = (13, 19)
 
 
-def _infer_rot6d_slices(action_dim: int, abs_action: bool) -> list[tuple[int, int]]:
+def _infer_rot6d_slices(action_dim: int) -> list[tuple[int, int]]:
     """Infer rot6d column slices from action dimension.
 
     Returns list of (start, end) tuples for rot6d columns, or empty list
-    if abs_action is False or action_dim is unrecognized.
+    if action_dim is unrecognized. Detection is purely structural (10D or 20D).
     """
-    if not abs_action:
-        return []
     if action_dim == 10:  # single-arm
         return [_SINGLE_ARM_ROT6D]
     elif action_dim == 20:  # dual-arm
@@ -41,7 +39,7 @@ class SpeedTuningEnvWrapper(gym.Wrapper):
     Internally, the wrapper:
       1. Calls the frozen BC policy to get an action chunk
       2. Interpolates the chunk based on the selected speed
-         (with Gram-Schmidt re-projection for rot6d columns)
+         (delta-aware: cumsum+lerp+diff for linear, SLERP for rotation)
       3. Executes up to min(k_skip, len(interpolated)) actions in the inner env
          (dynamic truncation: stops when interpolated actions are exhausted)
       4. Computes r_ST = alpha * v^beta + r_task per step
@@ -56,7 +54,8 @@ class SpeedTuningEnvWrapper(gym.Wrapper):
         alpha: Speed reward weight.
         beta: Speed reward exponent.
         k_skip: Number of env steps between speed decisions.
-        abs_action: Whether actions use rot6d representation.
+        abs_action: Kept for API compatibility (rot6d slices are now
+            inferred purely from action_dim).
     """
 
     def __init__(
@@ -81,22 +80,20 @@ class SpeedTuningEnvWrapper(gym.Wrapper):
 
         # Infer rot6d slices from action space
         act_dim = env.action_space.shape[0]
-        self._rot6d_slices = _infer_rot6d_slices(act_dim, abs_action)
+        self._rot6d_slices = _infer_rot6d_slices(act_dim)
 
         # Internal state
         self._current_speed = 1.0
         self._last_obs = None
 
     def _interpolate(self, action_chunk: np.ndarray) -> np.ndarray:
-        """Interpolate action chunk to k_skip actions with rotation-aware handling."""
-        interp = temporal_interpolate(action_chunk, self._current_speed, self.k_skip)
-        # Apply Gram-Schmidt to each rot6d slice
-        for s, e in self._rot6d_slices:
-            if e <= interp.shape[-1]:
-                from jax_flow.agents.speed_tuning.interpolation import _gram_schmidt_6d
-
-                interp[:, s:e] = _gram_schmidt_6d(interp[:, s:e])
-        return interp
+        """Interpolate delta action chunk to k_skip actions with rotation-aware handling."""
+        return temporal_interpolate(
+            action_chunk,
+            self._current_speed,
+            self.k_skip,
+            rot6d_slices=self._rot6d_slices,
+        )
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
