@@ -480,6 +480,9 @@ def main(cfg: DictConfig):
     episode_lengths = []
     episode_successes = []
     episode_speeds = []
+    recent_losses = []
+    recent_mean_qs = []
+    recent_td_errors = []
 
     for episode in range(total_episodes):
         obs, _ = train_env.reset(seed=episode)
@@ -555,8 +558,11 @@ def main(cfg: DictConfig):
                 }
                 jax_is_weights = jnp.array(is_weights)
 
-                agent, _train_info, td_errors = agent.update(jax_batch, jax_is_weights)
+                agent, train_info, td_errors = agent.update(jax_batch, jax_is_weights)
                 per_buffer.update_priorities(indices, np.array(td_errors))
+                recent_losses.append(float(train_info["loss"]))
+                recent_mean_qs.append(float(train_info["mean_q"]))
+                recent_td_errors.append(float(np.mean(np.array(td_errors))))
 
             obs = next_obs
 
@@ -584,18 +590,23 @@ def main(cfg: DictConfig):
             if wandb_enabled:
                 import wandb
 
-                wandb.log(
-                    {
-                        "train/episode_return": avg_ret,
-                        "train/episode_length": avg_len,
-                        "train/success_rate": avg_sr,
-                        "train/avg_speed": avg_spd,
-                        "train/epsilon": epsilon,
-                        "train/buffer_size": len(per_buffer),
-                        "train/global_step": global_step,
-                    },
-                    step=episode,
-                )
+                log_dict = {
+                    "train/episode_return": avg_ret,
+                    "train/episode_length": avg_len,
+                    "train/success_rate": avg_sr,
+                    "train/avg_speed": avg_spd,
+                    "train/epsilon": epsilon,
+                    "train/buffer_size": len(per_buffer),
+                    "train/global_step": global_step,
+                }
+                if recent_losses:
+                    log_dict["train/loss"] = np.mean(recent_losses)
+                    log_dict["train/mean_q"] = np.mean(recent_mean_qs)
+                    log_dict["train/mean_td_error"] = np.mean(recent_td_errors)
+                    recent_losses.clear()
+                    recent_mean_qs.clear()
+                    recent_td_errors.clear()
+                wandb.log(log_dict, step=episode)
 
         # Evaluation
         if eval_interval > 0 and (episode + 1) % eval_interval == 0:
