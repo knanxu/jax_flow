@@ -88,8 +88,8 @@ class SpeedTuningEnvWrapper(gym.Wrapper):
         self._last_obs = None
 
     def _interpolate(self, action_chunk: np.ndarray) -> np.ndarray:
-        """Interpolate action chunk with rotation-aware handling."""
-        interp = temporal_interpolate(action_chunk, self._current_speed)
+        """Interpolate action chunk to k_skip actions with rotation-aware handling."""
+        interp = temporal_interpolate(action_chunk, self._current_speed, self.k_skip)
         # Apply Gram-Schmidt to each rot6d slice
         for s, e in self._rot6d_slices:
             if e <= interp.shape[-1]:

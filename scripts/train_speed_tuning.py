@@ -34,7 +34,7 @@ from jax_flow.agents.speed_tuning.interpolation import make_speed_options
 from jax_flow.agents.speed_tuning.per_buffer import PrioritizedReplayBuffer
 from jax_flow.agents.speed_tuning.rainbow_agent import RainbowDQNAgent
 from jax_flow.agents.speed_tuning.speed_tuning_env import SpeedTuningEnvWrapper
-from jax_flow.core.checkpoint import load_checkpoint
+from jax_flow.core.checkpoint import load_checkpoint, restore_agent
 from jax_flow.data import DatasetManager, make_dataset, make_robomimic_dataset
 from jax_flow.envs import make_env, make_robomimic_env
 
@@ -322,28 +322,12 @@ def main(cfg: DictConfig):
         ex_obs = jnp.array(ex_sample["observations"][np.newaxis, ...])
 
     # Use action_dim from BC checkpoint config, NOT from dataset.
-    # Dataset may have transformed actions (e.g. 7D axis_angle -> 10D rot6d),
-    # but the BC network was built with the original action_dim.
     bc_action_dim = bc_ckpt_config.get("action_dim", ex_sample["actions"].shape[-1])
     bc_horizon = bc_ckpt_config.get("horizon", 16)
     ex_actions = jnp.zeros((1, bc_horizon, bc_action_dim))
 
-    # Create and restore BC agent
-    bc_agent = BCAgent.create(
-        seed=cfg.seed,
-        ex_observations=ex_obs,
-        ex_actions=ex_actions,
-        config=dict(bc_ckpt_config),
-    )
-    # Restore weights
-    bc_agent = bc_agent.replace(
-        network=bc_agent.network.replace(
-            params=bc_ckpt["params"],
-            opt_state=bc_agent.network.opt_state,
-            step=bc_ckpt.get("step", 1),
-        ),
-        ema_params=bc_ckpt.get("ema_params", bc_ckpt["params"]),
-    )
+    # Use restore_agent for correct loading (restores rng, ema_params, opt_state)
+    bc_agent, _ = restore_agent(bc_checkpoint_path, BCAgent, ex_obs, ex_actions)
     print("BC agent restored.")
 
     # ================================================================

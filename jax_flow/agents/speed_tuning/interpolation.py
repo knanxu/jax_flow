@@ -26,56 +26,55 @@ def _gram_schmidt_6d(d6: np.ndarray) -> np.ndarray:
 def temporal_interpolate(
     action_chunk: np.ndarray,
     speed: float,
+    k_skip: int,
     rot6d_slice: tuple[int, int] | None = None,
 ) -> np.ndarray:
-    """Interpolate action chunk based on speed multiplier.
+    """Interpolate action chunk to produce k_skip accelerated actions (Eq. 9-11).
 
-    Given an action chunk of length k, produces a shorter sequence when speed > 1.0
-    using linear interpolation between adjacent actions.
+    Paper formula:
+        interp_{f,v}(t) = f(⌊vt⌋) + (vt - ⌊vt⌋)/v * (f(⌊vt+1⌋) - f(⌊vt⌋))
 
-    For rot6d actions, pass rot6d_slice=(start, end) to indicate which columns
-    contain the 6D rotation. After linear interpolation, those columns are
-    re-projected to valid SO(3) via Gram-Schmidt.
+    where ⌊vt+1⌋ means floor(vt + 1), NOT floor(vt) + 1.
 
-    Formula: f(t) = f(floor(vt)) + (vt - floor(vt)) * (f(floor(vt)+1) - f(floor(vt)))
+    Given action chunk A = a_0:k (k+1 points), produces exactly k_skip actions.
+    At speed=1.0, output is the first k_skip actions of the original chunk.
 
     Args:
-        action_chunk: (k, action_dim) original action sequence.
-        speed: Speed multiplier v >= 1.0. Higher = faster = shorter output.
-        rot6d_slice: (start, end) column indices of the rot6d part, e.g. (3, 9)
-            for single-arm 10D actions [pos(3), rot6d(6), gripper(1)].
-            None = no rotation correction (pure linear interpolation).
+        action_chunk: (k+1, action_dim) original action sequence.
+        speed: Speed multiplier v >= 1.0.
+        k_skip: Number of output actions to produce (fixed length).
+        rot6d_slice: (start, end) column indices of rot6d part. None = no correction.
 
     Returns:
-        (new_len, action_dim) interpolated action sequence.
-        new_len = ceil(k / speed).
+        (k_skip, action_dim) interpolated action sequence.
     """
-    k = len(action_chunk)
-    if k == 0:
+    n_points = len(action_chunk)  # k+1
+    if n_points == 0:
         return action_chunk
 
     speed = max(speed, 1.0)
 
-    new_len = int(np.ceil(k / speed))
-    new_len = max(new_len, 1)
+    out = np.empty((k_skip, action_chunk.shape[-1]), dtype=action_chunk.dtype)
 
-    out = np.empty((new_len, action_chunk.shape[-1]), dtype=action_chunk.dtype)
+    for i in range(k_skip):
+        vt = speed * i
+        idx_lo = int(np.floor(vt))          # ⌊vt⌋
+        idx_hi = int(np.floor(vt + 1))      # ⌊vt+1⌋  (NOT ⌊vt⌋+1)
 
-    for i in range(new_len):
-        t_src = speed * i
-        idx_lo = int(np.floor(t_src))
-        # Clamp to valid range
-        if idx_lo >= k - 1:
-            out[i] = action_chunk[-1]
-            continue
-        idx_hi = idx_lo + 1
-        frac = t_src - idx_lo
-        out[i] = action_chunk[idx_lo] + frac * (
-            action_chunk[idx_hi] - action_chunk[idx_lo]
-        )
+        # Clamp indices to valid range
+        idx_lo = min(idx_lo, n_points - 1)
+        idx_hi = min(idx_hi, n_points - 1)
+
+        if idx_lo == idx_hi:
+            out[i] = action_chunk[idx_lo]
+        else:
+            frac = (vt - np.floor(vt)) / speed  # (vt - ⌊vt⌋) / v
+            out[i] = action_chunk[idx_lo] + frac * (
+                action_chunk[idx_hi] - action_chunk[idx_lo]
+            )
 
     # Re-project rotation columns to valid SO(3)
-    if rot6d_slice is not None and new_len > 0:
+    if rot6d_slice is not None and k_skip > 0:
         s, e = rot6d_slice
         out[:, s:e] = _gram_schmidt_6d(out[:, s:e])
 
