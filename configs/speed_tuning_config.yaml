@@ -50,7 +50,7 @@ algorithm:
   log_interval: 100  # log every N episodes
 
 eval:
-  eval_interval: 1000  # eval every N episodes
+  eval_interval: 400  # eval every N episodes
   num_episodes: 20
   save_video: true
   num_videos: 3
