@@ -564,37 +564,43 @@ def main(cfg: DictConfig):
             # --- Step-based logging (training metrics) ---
             if log_interval > 0 and global_step - last_log_step >= log_interval:
                 last_log_step = global_step
-                # Console: training params
-                avg_loss = np.mean(recent_losses) if recent_losses else float("nan")
-                avg_mq = np.mean(recent_mean_qs) if recent_mean_qs else float("nan")
-                avg_minq = np.mean(recent_min_qs) if recent_min_qs else float("nan")
-                avg_maxq = np.mean(recent_max_qs) if recent_max_qs else float("nan")
-                avg_td = np.mean(recent_td_errors) if recent_td_errors else float("nan")
-                print(
-                    f"Step {global_step}/{total_steps} | Ep {episode} | "
-                    f"Loss: {avg_loss:.4f} | Q: {avg_mq:.3f} [{avg_minq:.3f}, {avg_maxq:.3f}] | "
-                    f"TD: {avg_td:.4f} | Epsilon: {epsilon:.3f} | Buffer: {len(per_buffer)}"
-                )
-                if wandb_enabled:
-                    import wandb
+                if recent_losses:
+                    avg_loss = np.mean(recent_losses)
+                    avg_mq = np.mean(recent_mean_qs)
+                    avg_minq = np.mean(recent_min_qs)
+                    avg_maxq = np.mean(recent_max_qs)
+                    avg_td = np.mean(recent_td_errors)
+                    print(
+                        f"Step {global_step}/{total_steps} | Ep {episode} | "
+                        f"Loss: {avg_loss:.4f} | Q: {avg_mq:.3f} [{avg_minq:.3f}, {avg_maxq:.3f}] | "
+                        f"TD: {avg_td:.4f} | Epsilon: {epsilon:.3f} | Buffer: {len(per_buffer)}"
+                    )
+                    if wandb_enabled:
+                        import wandb
 
-                    log_dict = {
-                        "train/epsilon": epsilon,
-                        "train/buffer_size": len(per_buffer),
-                        "train/episode": episode,
-                    }
-                    if recent_losses:
-                        log_dict["train/loss"] = avg_loss
-                        log_dict["train/mean_q"] = avg_mq
-                        log_dict["train/min_q"] = avg_minq
-                        log_dict["train/max_q"] = avg_maxq
-                        log_dict["train/mean_td_error"] = avg_td
-                    wandb.log(log_dict, step=global_step)
-                recent_losses.clear()
-                recent_mean_qs.clear()
-                recent_min_qs.clear()
-                recent_max_qs.clear()
-                recent_td_errors.clear()
+                        wandb.log(
+                            {
+                                "train/loss": avg_loss,
+                                "train/mean_q": avg_mq,
+                                "train/min_q": avg_minq,
+                                "train/max_q": avg_maxq,
+                                "train/mean_td_error": avg_td,
+                                "train/epsilon": epsilon,
+                                "train/buffer_size": len(per_buffer),
+                                "train/episode": episode,
+                            },
+                            step=global_step,
+                        )
+                    recent_losses.clear()
+                    recent_mean_qs.clear()
+                    recent_min_qs.clear()
+                    recent_max_qs.clear()
+                    recent_td_errors.clear()
+                else:
+                    print(
+                        f"Step {global_step}/{total_steps} | Ep {episode} | "
+                        f"Collecting data... | Epsilon: {epsilon:.3f} | Buffer: {len(per_buffer)}"
+                    )
 
             # --- Step-based evaluation ---
             if eval_interval > 0 and global_step - last_eval_step >= eval_interval:
