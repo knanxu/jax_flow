@@ -456,6 +456,7 @@ def main(cfg: DictConfig):
 
     best_success_rate = -1.0
     global_step = 0  # total env steps (across all episodes)
+    macro_step = 0  # total macro-steps (one per speed decision)
     episode = 0
     last_log_step = 0
     last_eval_step = 0
@@ -509,6 +510,7 @@ def main(cfg: DictConfig):
             steps_executed = info.get("steps_executed", 1)
             ep_length += steps_executed
             global_step += steps_executed
+            macro_step += 1
 
             # Store ONE macro-step transition: (s, v, Σr, s', done)
             per_buffer.add(
@@ -520,7 +522,7 @@ def main(cfg: DictConfig):
             )
 
             # Train
-            if len(per_buffer) >= learning_starts and global_step % train_freq == 0:
+            if len(per_buffer) >= learning_starts and macro_step % train_freq == 0:
                 beta = min(
                     per_beta_end,
                     per_beta_start
