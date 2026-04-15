@@ -291,6 +291,8 @@ class RainbowDQNAgent(flax.struct.PyTreeNode):
             return weighted_loss, {
                 "loss": weighted_loss,
                 "mean_q": jnp.mean(q_current),
+                "min_q": jnp.min(q_current),
+                "max_q": jnp.max(q_current),
                 "td_errors": td_errors,
             }
 

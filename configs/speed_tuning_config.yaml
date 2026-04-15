@@ -20,8 +20,8 @@ algorithm:
   lr: 3e-4
   hidden_dims: [512, 512]
   num_atoms: 51
-  v_min: -10.0
-  v_max: 10.0
+  v_min: -0.5
+  v_max: 3.0
   discount: 0.99
   tau: 0.005
   activation: relu
@@ -31,7 +31,7 @@ algorithm:
   per_alpha: 0.6
   per_beta_start: 0.4
   per_beta_end: 1.0
-  buffer_capacity: 100000
+  buffer_capacity: 50000
 
   # Exploration (epsilon-greedy linear decay)
   epsilon_start: 1.0
@@ -40,24 +40,24 @@ algorithm:
 
   # Training
   batch_size: 64
-  total_episodes: 10000
+  total_steps: 500000  # total env steps
   learning_starts: 10000  # min transitions before training
   train_freq: 4  # train every N env steps
   grad_clip_norm: 10.0
   freeze_encoder: true
 
   # Logging
-  log_interval: 100  # log every N episodes
+  log_interval: 5000  # log every N env steps
 
 eval:
-  eval_interval: 1000  # eval every N episodes
+  eval_interval: 20000  # eval every N env steps
   num_episodes: 20
   save_video: true
   num_videos: 3
   video_fps: 30
 
 checkpoint:
-  save_freq: 500  # save every N episodes
+  save_freq: 50000  # save every N env steps
   keep_last_n: 3
 
 wandb:

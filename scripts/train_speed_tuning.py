@@ -440,7 +440,7 @@ def main(cfg: DictConfig):
     # ================================================================
     # 8. Training loop
     # ================================================================
-    total_episodes = algo.get("total_episodes", 5000)
+    total_steps = algo.get("total_steps", 500_000)
     batch_size = algo.get("batch_size", 256)
     learning_starts = algo.get("learning_starts", 1000)
     train_freq = algo.get("train_freq", 4)
@@ -449,15 +449,19 @@ def main(cfg: DictConfig):
     epsilon_decay_steps = algo.get("epsilon_decay_steps", 50000)
     per_beta_start = algo.get("per_beta_start", 0.4)
     per_beta_end = algo.get("per_beta_end", 1.0)
-    log_interval = algo.get("log_interval", 100)
-    eval_interval = cfg.eval.get("eval_interval", 200)
-    checkpoint_interval = cfg.checkpoint.get("save_freq", 500)
-    max_steps = cfg.task.env.max_episode_steps
+    log_interval = algo.get("log_interval", 5000)
+    eval_interval = cfg.eval.get("eval_interval", 20000)
+    checkpoint_interval = cfg.checkpoint.get("save_freq", 50000)
+    max_ep_steps = cfg.task.env.max_episode_steps
 
     best_success_rate = -1.0
     global_step = 0  # total env steps (across all episodes)
+    episode = 0
+    last_log_step = 0
+    last_eval_step = 0
+    last_ckpt_step = 0
 
-    print(f"\nStarting training for {total_episodes} episodes...")
+    print(f"\nStarting training for {total_steps} env steps...")
     print(f"Epsilon: {epsilon_start} -> {epsilon_end} over {epsilon_decay_steps} steps")
     print(f"PER beta: {per_beta_start} -> {per_beta_end}")
     print(f"Learning starts after {learning_starts} transitions")
@@ -468,16 +472,18 @@ def main(cfg: DictConfig):
     episode_speeds = []
     recent_losses = []
     recent_mean_qs = []
+    recent_min_qs = []
+    recent_max_qs = []
     recent_td_errors = []
 
-    for episode in range(total_episodes):
+    while global_step < total_steps:
         obs, _ = train_env.reset(seed=episode)
         done = False
         ep_return = 0.0
         ep_length = 0
         ep_speeds = []
 
-        while not done and ep_length < max_steps:
+        while not done and ep_length < max_ep_steps:
             # Epsilon schedule
             epsilon = max(
                 epsilon_end,
@@ -500,8 +506,9 @@ def main(cfg: DictConfig):
             next_obs, reward, terminated, truncated, info = train_env.step(speed_idx)
             done = terminated or truncated
             ep_return += reward
-            ep_length += info.get("steps_executed", 1)
-            global_step += info.get("steps_executed", 1)
+            steps_executed = info.get("steps_executed", 1)
+            ep_length += steps_executed
+            global_step += steps_executed
 
             # Store ONE macro-step transition: (s, v, Σr, s', done)
             per_buffer.add(
@@ -548,137 +555,160 @@ def main(cfg: DictConfig):
                 per_buffer.update_priorities(indices, np.array(td_errors))
                 recent_losses.append(float(train_info["loss"]))
                 recent_mean_qs.append(float(train_info["mean_q"]))
+                recent_min_qs.append(float(train_info["min_q"]))
+                recent_max_qs.append(float(train_info["max_q"]))
                 recent_td_errors.append(float(np.mean(np.array(td_errors))))
 
             obs = next_obs
 
-        # Episode stats — success is determined by the env info flag
-        ep_success = bool(info.get("success", False))
+            # --- Step-based logging (training metrics) ---
+            if log_interval > 0 and global_step - last_log_step >= log_interval:
+                last_log_step = global_step
+                # Console: training params
+                avg_loss = np.mean(recent_losses) if recent_losses else float("nan")
+                avg_mq = np.mean(recent_mean_qs) if recent_mean_qs else float("nan")
+                avg_minq = np.mean(recent_min_qs) if recent_min_qs else float("nan")
+                avg_maxq = np.mean(recent_max_qs) if recent_max_qs else float("nan")
+                avg_td = np.mean(recent_td_errors) if recent_td_errors else float("nan")
+                print(
+                    f"Step {global_step}/{total_steps} | Ep {episode} | "
+                    f"Loss: {avg_loss:.4f} | Q: {avg_mq:.3f} [{avg_minq:.3f}, {avg_maxq:.3f}] | "
+                    f"TD: {avg_td:.4f} | Epsilon: {epsilon:.3f} | Buffer: {len(per_buffer)}"
+                )
+                if wandb_enabled:
+                    import wandb
 
-        episode_returns.append(ep_return)
-        episode_lengths.append(ep_length)
-        episode_successes.append(ep_success)
-        episode_speeds.append(np.mean(ep_speeds) if ep_speeds else 1.0)
+                    log_dict = {
+                        "train/epsilon": epsilon,
+                        "train/buffer_size": len(per_buffer),
+                        "train/episode": episode,
+                    }
+                    if recent_losses:
+                        log_dict["train/loss"] = avg_loss
+                        log_dict["train/mean_q"] = avg_mq
+                        log_dict["train/min_q"] = avg_minq
+                        log_dict["train/max_q"] = avg_maxq
+                        log_dict["train/mean_td_error"] = avg_td
+                    wandb.log(log_dict, step=global_step)
+                recent_losses.clear()
+                recent_mean_qs.clear()
+                recent_min_qs.clear()
+                recent_max_qs.clear()
+                recent_td_errors.clear()
 
-        # Logging
-        if (episode + 1) % log_interval == 0:
-            recent = min(log_interval, len(episode_returns))
-            avg_ret = np.mean(episode_returns[-recent:])
-            avg_len = np.mean(episode_lengths[-recent:])
-            avg_sr = np.mean(episode_successes[-recent:])
-            avg_spd = np.mean(episode_speeds[-recent:])
-            print(
-                f"Episode {episode + 1}/{total_episodes} | "
-                f"Return: {avg_ret:.2f} | Length: {avg_len:.0f} | "
-                f"Success: {avg_sr:.2%} | Speed: {avg_spd:.2f} | "
-                f"Epsilon: {epsilon:.3f} | Buffer: {len(per_buffer)}"
-            )
-            if wandb_enabled:
-                import wandb
-
-                log_dict = {
-                    "train/episode_return": avg_ret,
-                    "train/episode_length": avg_len,
-                    "train/success_rate": avg_sr,
-                    "train/avg_speed": avg_spd,
-                    "train/epsilon": epsilon,
-                    "train/buffer_size": len(per_buffer),
-                    "train/global_step": global_step,
-                }
-                if recent_losses:
-                    log_dict["train/loss"] = np.mean(recent_losses)
-                    log_dict["train/mean_q"] = np.mean(recent_mean_qs)
-                    log_dict["train/mean_td_error"] = np.mean(recent_td_errors)
-                    recent_losses.clear()
-                    recent_mean_qs.clear()
-                    recent_td_errors.clear()
-                wandb.log(log_dict, step=episode)
-
-        # Evaluation
-        if eval_interval > 0 and (episode + 1) % eval_interval == 0:
-            print(f"\n[Episode {episode + 1}] Evaluating...")
-            eval_results = evaluate_speed_policy(
-                agent=agent,
-                eval_env=eval_env,
-                num_episodes=cfg.eval.get("num_episodes", 20),
-                max_steps=max_steps,
-                save_video=cfg.eval.get("save_video", True),
-                num_videos=cfg.eval.get("num_videos", 3),
-            )
-            print(
-                f"  Success: {eval_results['success_rate']:.2%} "
-                f"({eval_results['num_successes']}/{eval_results['num_episodes']}) | "
-                f"Length: {eval_results['avg_length']:.0f} +/- {eval_results['std_length']:.0f} | "
-                f"Success Length: {eval_results['avg_success_length']:.0f} | "
-                f"Speed: {eval_results['avg_speed']:.2f} +/- {eval_results['std_speed']:.2f}"
-            )
-
-            if wandb_enabled:
-                wandb.log(
-                    {
-                        "eval/success_rate": eval_results["success_rate"],
-                        "eval/avg_length": eval_results["avg_length"],
-                        "eval/std_length": eval_results["std_length"],
-                        "eval/avg_success_length": eval_results["avg_success_length"],
-                        "eval/avg_failure_length": eval_results["avg_failure_length"],
-                        "eval/avg_return": eval_results["avg_return"],
-                        "eval/avg_speed": eval_results["avg_speed"],
-                        "eval/std_speed": eval_results["std_speed"],
-                        "eval/max_speed_used": eval_results["max_speed_used"],
-                    },
-                    step=episode,
+            # --- Step-based evaluation ---
+            if eval_interval > 0 and global_step - last_eval_step >= eval_interval:
+                last_eval_step = global_step
+                print(f"\n[Step {global_step}] Evaluating...")
+                eval_results = evaluate_speed_policy(
+                    agent=agent,
+                    eval_env=eval_env,
+                    num_episodes=cfg.eval.get("num_episodes", 20),
+                    max_steps=max_ep_steps,
+                    save_video=cfg.eval.get("save_video", True),
+                    num_videos=cfg.eval.get("num_videos", 3),
+                )
+                print(
+                    f"  Success: {eval_results['success_rate']:.2%} "
+                    f"({eval_results['num_successes']}/{eval_results['num_episodes']}) | "
+                    f"Length: {eval_results['avg_length']:.0f} +/- {eval_results['std_length']:.0f} | "
+                    f"Success Length: {eval_results['avg_success_length']:.0f} | "
+                    f"Speed: {eval_results['avg_speed']:.2f} +/- {eval_results['std_speed']:.2f}"
                 )
 
-                # Upload eval videos
-                if (
-                    cfg.wandb.get("log_videos", True)
-                    and "videos" in eval_results
-                ):
-                    video_fps = cfg.eval.get("video_fps", 30)
-                    for i, video_frames in enumerate(eval_results["videos"]):
-                        # video_frames: (T, H, W, C) -> (T, C, H, W)
-                        video_frames_t = np.transpose(video_frames, (0, 3, 1, 2))
-                        wandb.log(
-                            {
-                                f"eval/video_{i}": wandb.Video(
-                                    video_frames_t,
-                                    fps=video_fps,
-                                    format="mp4",
-                                )
-                            },
-                            step=episode,
-                        )
+                if wandb_enabled:
+                    wandb.log(
+                        {
+                            "eval/success_rate": eval_results["success_rate"],
+                            "eval/avg_length": eval_results["avg_length"],
+                            "eval/std_length": eval_results["std_length"],
+                            "eval/avg_success_length": eval_results["avg_success_length"],
+                            "eval/avg_failure_length": eval_results["avg_failure_length"],
+                            "eval/avg_return": eval_results["avg_return"],
+                            "eval/avg_speed": eval_results["avg_speed"],
+                            "eval/std_speed": eval_results["std_speed"],
+                            "eval/max_speed_used": eval_results["max_speed_used"],
+                        },
+                        step=global_step,
+                    )
 
-            if eval_results["success_rate"] > best_success_rate:
-                best_success_rate = eval_results["success_rate"]
-                print(f"  New best! Success rate: {best_success_rate:.2%}")
+                    # Upload eval videos
+                    if (
+                        cfg.wandb.get("log_videos", True)
+                        and "videos" in eval_results
+                    ):
+                        video_fps = cfg.eval.get("video_fps", 30)
+                        for i, video_frames in enumerate(eval_results["videos"]):
+                            video_frames_t = np.transpose(video_frames, (0, 3, 1, 2))
+                            wandb.log(
+                                {
+                                    f"eval/video_{i}": wandb.Video(
+                                        video_frames_t,
+                                        fps=video_fps,
+                                        format="mp4",
+                                    )
+                                },
+                                step=global_step,
+                            )
+
+                if eval_results["success_rate"] > best_success_rate:
+                    best_success_rate = eval_results["success_rate"]
+                    print(f"  New best! Success rate: {best_success_rate:.2%}")
+                    _save_speed_tuning_checkpoint(
+                        output_dir / "best_model.pkl",
+                        agent,
+                        global_step,
+                        bc_checkpoint_path,
+                        speed_options,
+                        normalizers,
+                        best_success_rate,
+                    )
+
+            # --- Step-based checkpoint ---
+            if checkpoint_interval > 0 and global_step - last_ckpt_step >= checkpoint_interval:
+                last_ckpt_step = global_step
                 _save_speed_tuning_checkpoint(
-                    output_dir / "best_model.pkl",
+                    output_dir / f"checkpoint_step{global_step}.pkl",
                     agent,
-                    episode,
+                    global_step,
                     bc_checkpoint_path,
                     speed_options,
                     normalizers,
                     best_success_rate,
                 )
 
-        # Checkpoint
-        if checkpoint_interval > 0 and (episode + 1) % checkpoint_interval == 0:
-            _save_speed_tuning_checkpoint(
-                output_dir / f"checkpoint_ep{episode + 1}.pkl",
-                agent,
-                episode,
-                bc_checkpoint_path,
-                speed_options,
-                normalizers,
-                best_success_rate,
+            if global_step >= total_steps:
+                break
+
+        # Episode stats
+        ep_success = bool(info.get("success", False))
+        episode_returns.append(ep_return)
+        episode_lengths.append(ep_length)
+        episode_successes.append(ep_success)
+        episode_speeds.append(np.mean(ep_speeds) if ep_speeds else 1.0)
+        episode += 1
+
+        # Per-episode wandb log (rollout metrics)
+        if wandb_enabled:
+            import wandb
+
+            recent = min(50, len(episode_returns))
+            wandb.log(
+                {
+                    "rollout/episode_return": ep_return,
+                    "rollout/episode_length": ep_length,
+                    "rollout/episode_success": float(ep_success),
+                    "rollout/avg_speed": float(np.mean(ep_speeds)) if ep_speeds else 1.0,
+                    "rollout/success_rate_50ep": float(np.mean(episode_successes[-recent:])),
+                },
+                step=global_step,
             )
 
     # Final save
     _save_speed_tuning_checkpoint(
         output_dir / "final_model.pkl",
         agent,
-        total_episodes,
+        global_step,
         bc_checkpoint_path,
         speed_options,
         normalizers,
@@ -693,7 +723,7 @@ def main(cfg: DictConfig):
 
 
 def _save_speed_tuning_checkpoint(
-    path, agent, episode, bc_checkpoint_path, speed_options, normalizers, best_sr
+    path, agent, global_step, bc_checkpoint_path, speed_options, normalizers, best_sr
 ):
     """Save SpeedTuning checkpoint."""
     import pickle
@@ -707,7 +737,7 @@ def _save_speed_tuning_checkpoint(
         "step": agent.network.step,
         "config": agent.config,
         "rng": agent.rng,
-        "episode": episode,
+        "global_step": global_step,
         "bc_checkpoint_path": str(bc_checkpoint_path),
         "speed_options": speed_options,
         "normalizers": normalizers,
