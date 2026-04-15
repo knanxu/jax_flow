@@ -38,7 +38,7 @@ class SpeedTuningEnvWrapper(gym.Wrapper):
     The RL agent outputs a discrete speed index each macro-step.
     Internally, the wrapper:
       1. Calls the frozen BC policy to get an action chunk
-      2. Interpolates the chunk based on the selected speed
+      2. Denormalizes, interpolates in real action space, renormalizes
          (delta-aware: cumsum+lerp+diff for linear, SLERP for rotation)
       3. Executes up to min(k_skip, len(interpolated)) actions in the inner env
          (dynamic truncation: stops when interpolated actions are exhausted)
@@ -56,6 +56,9 @@ class SpeedTuningEnvWrapper(gym.Wrapper):
         k_skip: Number of env steps between speed decisions.
         abs_action: Kept for API compatibility (rot6d slices are now
             inferred purely from action_dim).
+        action_normalizer: Action normalizer from the BC pipeline. When
+            provided, interpolation is performed in denormalized (real)
+            action space so that rot6d SLERP operates on valid rotations.
     """
 
     def __init__(
@@ -67,6 +70,7 @@ class SpeedTuningEnvWrapper(gym.Wrapper):
         beta: float = 2.0,
         k_skip: int = 4,
         abs_action: bool = True,
+        action_normalizer=None,
     ):
         super().__init__(env)
         self.bc_agent = bc_agent
@@ -74,6 +78,7 @@ class SpeedTuningEnvWrapper(gym.Wrapper):
         self.alpha = alpha
         self.beta = beta
         self.k_skip = k_skip
+        self.action_normalizer = action_normalizer
 
         # Override action space to discrete speed selection
         self.action_space = Discrete(len(speed_options))
@@ -87,13 +92,26 @@ class SpeedTuningEnvWrapper(gym.Wrapper):
         self._last_obs = None
 
     def _interpolate(self, action_chunk: np.ndarray) -> np.ndarray:
-        """Interpolate delta action chunk to k_skip actions with rotation-aware handling."""
-        return temporal_interpolate(
-            action_chunk,
+        """Interpolate delta action chunk to k_skip actions with rotation-aware handling.
+
+        When action_normalizer is available, denormalizes before interpolation
+        and renormalizes after, so that rot6d SLERP operates on valid rotations.
+        """
+        if self.action_normalizer is not None:
+            chunk_raw = self.action_normalizer.unnormalize(action_chunk)
+        else:
+            chunk_raw = action_chunk
+
+        interpolated_raw = temporal_interpolate(
+            chunk_raw,
             self._current_speed,
             self.k_skip,
             rot6d_slices=self._rot6d_slices,
         )
+
+        if self.action_normalizer is not None:
+            return self.action_normalizer.normalize(interpolated_raw)
+        return interpolated_raw
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)

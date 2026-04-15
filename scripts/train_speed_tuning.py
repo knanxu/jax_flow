@@ -342,6 +342,8 @@ def main(cfg: DictConfig):
     # Use abs_action from BC checkpoint — determines whether env needs rot6d->axis_angle conversion
     bc_abs_action = bc_ckpt_config.get("abs_action", False)
 
+    action_normalizer = normalizers.get("action")
+
     train_env = create_base_env(cfg, normalizers, resolved_path, bc_ckpt_config, abs_action=bc_abs_action)
     train_env = SpeedTuningEnvWrapper(
         env=train_env,
@@ -351,6 +353,7 @@ def main(cfg: DictConfig):
         beta=algo.get("beta", 2.0),
         k_skip=algo.get("k_skip", 4),
         abs_action=bc_abs_action,
+        action_normalizer=action_normalizer,
     )
 
     eval_env = create_base_env(cfg, normalizers, resolved_path, bc_ckpt_config, abs_action=bc_abs_action)
@@ -362,6 +365,7 @@ def main(cfg: DictConfig):
         beta=algo.get("beta", 2.0),
         k_skip=algo.get("k_skip", 4),
         abs_action=bc_abs_action,
+        action_normalizer=action_normalizer,
     )
 
     # ================================================================

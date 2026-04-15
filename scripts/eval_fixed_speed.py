@@ -262,6 +262,7 @@ def main(cfg: DictConfig):
             beta=0.0,
             k_skip=k_skip,
             abs_action=bc_abs_action,
+            action_normalizer=normalizers.get("action"),
         )
         # Force the wrapper to always use this speed
         env._current_speed = speed
