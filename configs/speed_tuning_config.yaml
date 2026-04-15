@@ -40,24 +40,24 @@ algorithm:
 
   # Training
   batch_size: 64
-  total_steps: 500000  # total env steps
-  learning_starts: 5000  # min transitions (macro-steps) before training
+  total_episodes: 10000
+  learning_starts: 10000  # min transitions before training
   train_freq: 4  # train every N env steps
   grad_clip_norm: 10.0
   freeze_encoder: true
 
   # Logging
-  log_interval: 10000  # log every N env steps
+  log_interval: 100  # log every N episodes
 
 eval:
-  eval_interval: 20000  # eval every N env steps
+  eval_interval: 1000  # eval every N episodes
   num_episodes: 20
   save_video: true
   num_videos: 3
   video_fps: 30
 
 checkpoint:
-  save_freq: 50000  # save every N env steps
+  save_freq: 500  # save every N episodes
   keep_last_n: 3
 
 wandb:
