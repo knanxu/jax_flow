@@ -41,13 +41,13 @@ algorithm:
   # Training
   batch_size: 64
   total_steps: 500000  # total env steps
-  learning_starts: 10000  # min transitions before training
+  learning_starts: 5000  # min transitions (macro-steps) before training
   train_freq: 4  # train every N env steps
   grad_clip_norm: 10.0
   freeze_encoder: true
 
   # Logging
-  log_interval: 5000  # log every N env steps
+  log_interval: 10000  # log every N env steps
 
 eval:
   eval_interval: 20000  # eval every N env steps
