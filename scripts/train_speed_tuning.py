@@ -602,8 +602,12 @@ def main(cfg: DictConfig):
                         f"Collecting data... | Epsilon: {epsilon:.3f} | Buffer: {len(per_buffer)}"
                     )
 
-            # --- Step-based evaluation ---
-            if eval_interval > 0 and global_step - last_eval_step >= eval_interval:
+            # --- Step-based evaluation (skip before training starts) ---
+            if (
+                eval_interval > 0
+                and len(per_buffer) >= learning_starts
+                and global_step - last_eval_step >= eval_interval
+            ):
                 last_eval_step = global_step
                 print(f"\n[Step {global_step}] Evaluating...")
                 eval_results = evaluate_speed_policy(
@@ -693,22 +697,6 @@ def main(cfg: DictConfig):
         episode_successes.append(ep_success)
         episode_speeds.append(np.mean(ep_speeds) if ep_speeds else 1.0)
         episode += 1
-
-        # Per-episode wandb log (rollout metrics)
-        if wandb_enabled:
-            import wandb
-
-            recent = min(50, len(episode_returns))
-            wandb.log(
-                {
-                    "rollout/episode_return": ep_return,
-                    "rollout/episode_length": ep_length,
-                    "rollout/episode_success": float(ep_success),
-                    "rollout/avg_speed": float(np.mean(ep_speeds)) if ep_speeds else 1.0,
-                    "rollout/success_rate_50ep": float(np.mean(episode_successes[-recent:])),
-                },
-                step=global_step,
-            )
 
     # Final save
     _save_speed_tuning_checkpoint(
