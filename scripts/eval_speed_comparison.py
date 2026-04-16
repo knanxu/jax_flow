@@ -566,7 +566,7 @@ def save_videos(output_dir, video_data, seed, fps=30):
     b_len = video_data["baseline_length"]
     s_len = video_data["speedtuning_length"]
 
-    if not b_frames or not s_frames:
+    if len(b_frames) == 0 or len(s_frames) == 0:
         print("  ✗ No frames to save")
         return
 
