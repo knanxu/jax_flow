@@ -4,6 +4,7 @@ defaults:
 
 algorithm:
   bc_checkpoint: null  # Required: path to trained BC checkpoint
+  speed_checkpoint: null  # Required for eval_speed_comparison.py: path to trained SpeedTuning checkpoint
 
   # Speed options: range [1.0, max_speed] with given granularity
   max_speed: 4.0
