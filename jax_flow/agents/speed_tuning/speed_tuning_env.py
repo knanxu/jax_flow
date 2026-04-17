@@ -119,7 +119,7 @@ class SpeedTuningEnvWrapper(gym.Wrapper):
         self._last_obs = obs
         return obs, info
 
-    def step(self, speed_idx):
+    def step(self, speed_idx, render_callback=None):
         """Execute one macro-step of the SpeedTuning loop.
 
         Executes min(k_skip, len(interpolated)) steps — never pads with
@@ -127,6 +127,9 @@ class SpeedTuningEnvWrapper(gym.Wrapper):
 
         Args:
             speed_idx: Integer index into speed_options.
+            render_callback: Optional callback(obs) called after each inner step
+                for frame-by-frame rendering. Used to align video frame count
+                with baseline BC evaluation.
 
         Returns:
             (obs, total_reward, terminated, truncated, info)
@@ -157,6 +160,10 @@ class SpeedTuningEnvWrapper(gym.Wrapper):
             r_st = r_speed + r_task
             total_reward += r_st
             step_count += 1
+
+            # Call render callback after each inner step for frame-aligned videos
+            if render_callback is not None:
+                render_callback(obs)
 
             if terminated or truncated:
                 break

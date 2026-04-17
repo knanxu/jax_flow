@@ -323,13 +323,24 @@ def eval_speedtuning(speed_agent, env, num_episodes, max_steps):
     }
 
 
-def record_paired_video(bc_agent, speed_agent, baseline_env, speed_env, seed, max_steps, fps=30):
+def record_paired_video(bc_agent, speed_agent, cfg, normalizers, resolved_path,
+                        bc_ckpt_config, speed_options, k_skip, seed, max_steps, fps=30):
     """Record a single paired comparison video for a specific seed.
+
+    Creates fresh env instances to ensure identical initial states.
 
     Returns:
         dict with baseline_frames, speedtuning_frames, baseline_length, speedtuning_length, trajectory
     """
     from jax_flow.core.evaluation import rollout_episode
+
+    bc_abs_action = bc_ckpt_config.get("abs_action", False)
+    action_normalizer = normalizers.get("action")
+
+    # Create fresh baseline env (with ActionChunking)
+    baseline_env = create_baseline_env(
+        cfg, normalizers, resolved_path, bc_ckpt_config, abs_action=bc_abs_action,
+    )
 
     # Record baseline
     baseline_result = rollout_episode(
@@ -337,12 +348,28 @@ def record_paired_video(bc_agent, speed_agent, baseline_env, speed_env, seed, ma
         save_video=True, seed=seed,
     )
 
-    # Record speedtuning
+    # Create fresh speed env (no ActionChunking, wrapped with SpeedTuning)
+    speed_env = create_base_env(
+        cfg, normalizers, resolved_path, bc_ckpt_config, abs_action=bc_abs_action,
+    )
+    speed_env = SpeedTuningEnvWrapper(
+        env=speed_env, bc_agent=bc_agent, speed_options=speed_options,
+        alpha=0.0, beta=0.0, k_skip=k_skip,
+        abs_action=bc_abs_action, action_normalizer=action_normalizer,
+    )
+
+    # Record speedtuning with frame-aligned rendering
     obs, _ = speed_env.reset(seed=seed)
     done = False
     ep_length = 0
     trajectory = []
     frames = []
+
+    # Render callback to capture frame after each inner env step
+    def render_callback(_obs):
+        frame = speed_env.render()
+        if frame is not None:
+            frames.append(frame)
 
     while not done and ep_length < max_steps:
         obs_batch = _obs_to_batch(obs)
@@ -354,17 +381,16 @@ def record_paired_video(bc_agent, speed_agent, baseline_env, speed_env, seed, ma
         action = speed_agent.eval_action(obs_batch)
         speed_idx = int(action[0])
 
-        obs, reward, terminated, truncated, info = speed_env.step(speed_idx)
+        # Pass render_callback to capture frames at each inner step
+        obs, reward, terminated, truncated, info = speed_env.step(
+            speed_idx, render_callback=render_callback
+        )
         done = terminated or truncated
         steps_executed = info.get("steps_executed", 1)
         speed = info.get("speed", 1.0)
 
         ep_length += steps_executed
         trajectory.append((ep_length, speed))
-
-        frame = speed_env.render()
-        if frame is not None:
-            frames.append(frame)
 
     return {
         "baseline_frames": baseline_result.get("frames", []),
@@ -809,7 +835,8 @@ def main(cfg: DictConfig):
         print(f"  Recording seed {chosen_seed} (both succeeded)...")
 
         video_data = record_paired_video(
-            bc_agent, speed_agent, baseline_env, speed_env,
+            bc_agent, speed_agent, cfg, normalizers, resolved_path,
+            bc_ckpt_config, speed_options, k_skip,
             chosen_seed, max_steps, fps=cfg.eval.get("video_fps", 30),
         )
         print(f"  ✓ Baseline: {video_data['baseline_length']} steps")

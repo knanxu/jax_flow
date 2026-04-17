@@ -152,7 +152,18 @@ def evaluate_speed_policy(
             action = agent.eval_action(obs_batch)
             speed_idx = int(action[0])
 
-            obs, reward, terminated, truncated, info = eval_env.step(speed_idx)
+            # Render callback for frame-aligned video capture
+            if save_this_video:
+                def render_callback(_obs):
+                    frame = eval_env.render()
+                    if frame is not None:
+                        frames.append(frame)
+                obs, reward, terminated, truncated, info = eval_env.step(
+                    speed_idx, render_callback=render_callback
+                )
+            else:
+                obs, reward, terminated, truncated, info = eval_env.step(speed_idx)
+
             done = terminated or truncated
             ep_return += reward
             ep_length += info.get("steps_executed", 1)
@@ -160,11 +171,6 @@ def evaluate_speed_policy(
 
             if "success" in info and bool(info["success"]):
                 ep_success = True
-
-            if save_this_video:
-                frame = eval_env.render()
-                if frame is not None:
-                    frames.append(frame)
 
         successes.append(ep_success)
         lengths.append(ep_length)
